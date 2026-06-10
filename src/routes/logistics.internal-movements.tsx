@@ -1,7 +1,7 @@
 import React, { useState, useMemo } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowRightLeft, Loader2, Calendar, Filter, MapPin, ClipboardText } from 'lucide-react';
+import { ArrowRightLeft, Loader2, Calendar, Filter, MapPin, FileText } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Animal, InternalMovement, OperationalList } from '../types';
 
@@ -132,7 +132,7 @@ export function InternalMovementsPage() {
                       <td className="px-6 py-4">
                         <div className="space-y-0.5">
                           <p className="text-xs font-black text-slate-800 uppercase tracking-tight flex items-center gap-1.5">
-                            <ClipboardText size={12} className="text-slate-400" /> {move.reason || 'Unspecified Revision'}
+                            <FileText size={12} className="text-slate-400" /> {move.reason || 'Unspecified Revision'}
                           </p>
                           {move.notes && <p className="text-[11px] font-medium text-slate-500 leading-relaxed">{move.notes}</p>}
                         </div>
