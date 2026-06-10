@@ -5,6 +5,7 @@ import {
   CheckCircle2, AlertCircle, Droplets, Lock, HeartPulse, 
   ChevronLeft, ChevronRight, Loader2, Edit3, X, Save
 } from 'lucide-react';
+import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { dailyRoundsService } from '../services/dailyRoundsService';
@@ -28,13 +29,14 @@ export function DailyRoundsPage() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
   
+  // Safe local date formatting
   const [selectedDate, setSelectedDate] = useState<string>(
-    new Date().toISOString().split('T')[0]
+    format(new Date(), 'yyyy-MM-dd')
   );
+  
   const [activeSection, setActiveSection] = useState<string>('ALL');
   const [activeShift, setActiveShift] = useState<string>('Morning');
   
-  // Local drafts state to support safe bulk submissions
   const [draftRounds, setDraftRounds] = useState<Record<string, Partial<DailyRound>>>({});
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [initials, setInitials] = useState('');
@@ -56,14 +58,12 @@ export function DailyRoundsPage() {
     currentNote: ''
   });
 
-  // Pre-populate staff initials from custom Auth profile if loaded
   React.useEffect(() => {
     if (profile?.initials) {
       setInitials(profile.initials);
     }
   }, [profile]);
 
-  // Flush local draft cache on selected date or shift change to prevent accidental drift
   React.useEffect(() => {
     setDraftRounds({});
     setHasUnsavedChanges(false);
@@ -113,9 +113,10 @@ export function DailyRoundsPage() {
   }, [animals, rounds, activeSection, draftRounds]);
 
   const shiftDate = (days: number) => {
-    const current = new Date(selectedDate);
-    current.setDate(current.getDate() + days);
-    setSelectedDate(current.toISOString().split('T')[0]);
+    // Safe date math using date-fns
+    const current = parseISO(selectedDate);
+    const nextDate = addDays(current, days);
+    setSelectedDate(format(nextDate, 'yyyy-MM-dd'));
   };
 
   const handleToggle = (animal: Animal, currentRound: DailyRound | null, field: 'is_alive' | 'water_checked' | 'locks_secured') => {
@@ -123,7 +124,6 @@ export function DailyRoundsPage() {
     const currentWater = currentRound ? currentRound.water_checked : false;
     const currentLocks = currentRound ? currentRound.locks_secured : false;
 
-    // Independent toggles behavior: clicking one button only toggles its respective column
     const newAliveState = field === 'is_alive' ? !currentAlive : currentAlive;
     const newWaterState = field === 'water_checked' ? !currentWater : currentWater;
     const newLocksState = field === 'locks_secured' ? !currentLocks : currentLocks;
@@ -167,7 +167,6 @@ export function DailyRoundsPage() {
 
       await dailyRoundsService.bulkUpsertRounds(payloads);
       
-      // Invalidate queries to reload fresh validated database records
       await queryClient.invalidateQueries({ queryKey: ['daily_rounds', selectedDate, activeShift] });
       
       setDraftRounds({});
@@ -194,7 +193,6 @@ export function DailyRoundsPage() {
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       
-      {/* Top Header & Controls */}
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm col-span-full">
         <div className="flex items-center justify-between xl:justify-start gap-4">
           <div>
@@ -214,7 +212,6 @@ export function DailyRoundsPage() {
         
         <div className="flex flex-col lg:flex-row items-center gap-4 self-center xl:self-auto w-full xl:w-auto">
           
-          {/* Shift Selector */}
           <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner w-full lg:w-auto overflow-x-auto custom-scrollbar shrink-0">
             {SHIFT_OPTIONS.map(shift => (
               <button
@@ -231,7 +228,6 @@ export function DailyRoundsPage() {
             ))}
           </div>
 
-          {/* Section Toolbar */}
           <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner overflow-x-auto w-full lg:w-auto custom-scrollbar shrink-0">
             {SECTION_BAR.map(btn => (
               <button
@@ -248,7 +244,6 @@ export function DailyRoundsPage() {
             ))}
           </div>
 
-          {/* Date Picker */}
           <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner w-full lg:w-auto justify-between lg:justify-start shrink-0">
             <button onClick={() => shiftDate(-1)} className="p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg transition-all shadow-sm">
               <ChevronLeft size={14} />
@@ -275,7 +270,6 @@ export function DailyRoundsPage() {
         </div>
       )}
 
-      {/* Main Checklist Matrix */}
       <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
         {roundsError ? (
           <div className="p-10 text-center text-rose-600 bg-rose-50 font-bold flex flex-col items-center gap-3">
@@ -330,7 +324,6 @@ export function DailyRoundsPage() {
                           </div>
                         </td>
 
-                        {/* Interactive Toggle: ALIVE */}
                         <td className="px-4 py-4 whitespace-nowrap text-center">
                           <button
                             onClick={() => handleToggle(animal, round, 'is_alive')}
@@ -344,7 +337,6 @@ export function DailyRoundsPage() {
                           </button>
                         </td>
 
-                        {/* Interactive Toggle: WATER */}
                         <td className="px-4 py-4 whitespace-nowrap text-center">
                           <button
                             onClick={() => handleToggle(animal, round, 'water_checked')}
@@ -358,7 +350,6 @@ export function DailyRoundsPage() {
                           </button>
                         </td>
 
-                        {/* Interactive Toggle: LOCKS */}
                         <td className="px-4 py-4 whitespace-nowrap text-center">
                           <button
                             onClick={() => handleToggle(animal, round, 'locks_secured')}
@@ -372,7 +363,6 @@ export function DailyRoundsPage() {
                           </button>
                         </td>
 
-                        {/* Welfare Notes Box */}
                         <td className="px-6 py-4 max-w-xs text-slate-500 font-medium leading-relaxed">
                           <button
                             onClick={() => setNoteModalState({ isOpen: true, animal, round, currentNote: round?.animal_issue_note || '' })}
@@ -405,7 +395,6 @@ export function DailyRoundsPage() {
         )}
       </div>
 
-      {/* Certification & Bulk Upload Control Deck */}
       <div className="bg-slate-950 text-white rounded-2xl border border-slate-800 shadow-xl p-6 flex flex-col md:flex-row items-center justify-between gap-6">
         <div className="space-y-1.5 text-center md:text-left flex-1">
           <h3 className="text-sm font-black uppercase tracking-widest text-emerald-400 flex items-center justify-center md:justify-start gap-2">
@@ -471,7 +460,6 @@ export function DailyRoundsPage() {
         </div>
       </div>
 
-      {/* Embedded Notes Modal */}
       {noteModalState.isOpen && noteModalState.animal && (
         <div className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm">
           <div className="bg-white rounded-2xl shadow-xl w-full max-w-md overflow-hidden flex flex-col border border-slate-200">

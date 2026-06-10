@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { ArrowLeft, FileText, Stethoscope, ClipboardList, AlertTriangle, ShieldAlert, Scale, Thermometer, GitMerge, Edit, Archive, RefreshCcw, Loader2, Plus, Calendar, X } from 'lucide-react';
+import { format } from 'date-fns';
 import AnimalFormModal from './AnimalFormModal';
 import DailyLogFormModal from './DailyLogFormModal';
 import { dailyLogService } from '../../services/dailyLogService';
@@ -21,10 +22,11 @@ export function AnimalProfile({ animal, onClose }: AnimalProfileProps) {
   const [editingLogTarget, setEditingLogTarget] = useState<DailyLog | undefined>(undefined);
   const [logModalMode, setLogModalMode] = useState<'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION'>('OBSERVATION');
   
-  // Disposition / Archive State
   const [isArchiveModalOpen, setIsArchiveModalOpen] = useState(false);
   const [dispositionType, setDispositionType] = useState('TRANSFER_OUT');
-  const [dispositionDate, setDispositionDate] = useState(new Date().toISOString().split('T')[0]);
+  
+  // Safe local date formatting
+  const [dispositionDate, setDispositionDate] = useState(format(new Date(), 'yyyy-MM-dd'));
   const [destination, setDestination] = useState('');
   const [dispositionNotes, setDispositionNotes] = useState('');
 
@@ -36,19 +38,17 @@ export function AnimalProfile({ animal, onClose }: AnimalProfileProps) {
 
   const archiveMutation = useMutation({
     mutationFn: async () => {
-      // 1. ZLA Compliance: If transferred offsite, map to schema constraints
       if (dispositionType === 'TRANSFER_OUT') {
         const { error: transferError } = await supabase.from('external_transfers').insert([{
           animal_id: animal.id,
           transfer_type: dispositionType,
           transfer_date: dispositionDate,
-          entity_name: destination || 'Unknown Institution', // required field in schema
+          entity_name: destination || 'Unknown Institution',
           notes: dispositionNotes
         }]);
         if (transferError) throw transferError;
       }
 
-      // 2. Archive the master record using the actual schema fields
       const archiveReasonString = `[${dispositionType}] ${destination && dispositionType === 'TRANSFER_OUT' ? 'To: ' + destination + ' - ' : ''}${dispositionNotes}`;
       
       const { error: updateError } = await supabase
@@ -312,7 +312,6 @@ export function AnimalProfile({ animal, onClose }: AnimalProfileProps) {
           />
         )}
 
-        {/* --- DISPOSITION WIZARD MODAL --- */}
         {isArchiveModalOpen && (
           <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 backdrop-blur-sm">
             <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden border border-slate-200">

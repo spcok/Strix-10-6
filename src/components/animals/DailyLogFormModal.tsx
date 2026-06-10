@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { useForm } from '@tanstack/react-form';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { X, Save, Loader2, AlertCircle, Plus, Trash2, Scale, Utensils, Thermometer, Clock } from 'lucide-react';
+import { format } from 'date-fns';
 import { dailyLogService } from '../../services/dailyLogService';
 import { Animal, DailyLog } from '../../types';
 
@@ -197,7 +198,8 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
   const form = useForm({
     defaultValues: {
-      log_date: initialLogData?.log_date ? new Date(initialLogData.log_date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0],
+      // Safe local date formatting
+      log_date: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
       log_time: initialLogData?.log_date ? new Date(initialLogData.log_date).toTimeString().slice(0, 5) : new Date().toTimeString().slice(0, 5),
       notes: initialLogData?.notes || '',
       
@@ -282,7 +284,6 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
               {mode !== 'FEEDING' && <TextInput name="log_time" label="Time of Log (HH:MM)" type="time" />}
             </div>
 
-            {/* 1. WEIGHT SECTION (INCLUDES HIGH RESOLUTION TIMESTAMPS) */}
             {mode === 'WEIGHT' && (
               <div className="space-y-4">
                 <form.Subscribe selector={(state) => state.values.weight_not_required}>
@@ -341,7 +342,6 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
               </div>
             )}
 
-            {/* 2. TEMPERATURE SECTION (PROFILE MASK CONFIGURED) */}
             {mode === 'TEMPERATURE' && (
               <div className="p-4 bg-slate-50 border border-slate-200 rounded-xl">
                 {animal.ambient_temp_only ? (
@@ -355,7 +355,6 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
               </div>
             )}
 
-            {/* 3. MULTI-FEEDING COMPOSITE GRID LAYOUT */}
             {mode === 'FEEDING' && (
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
@@ -429,7 +428,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
             type="submit"
             form="quick-log-form"
             disabled={logMutation.isPending}
-            className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-sm"
+            className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-50 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-sm"
           >
             {logMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
             {initialLogData ? 'Save Amendments' : 'Commit Worksheet Logs'}

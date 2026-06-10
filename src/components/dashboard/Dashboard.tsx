@@ -24,7 +24,7 @@ import { AnimalProfile } from '../animals/AnimalProfile';
 const columnHelper = createColumnHelper<Animal>();
 const EXOTIC_CATEGORIES = ['EXOTIC'];
 
-export function Dashboard() {
+export default function Dashboard() {
   const queryClient = useQueryClient();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [globalFilter, setGlobalFilter] = useState('');

@@ -1,8 +1,9 @@
 import React, { useState, useMemo } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
 import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter } from 'lucide-react';
+import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
@@ -12,7 +13,8 @@ export const Route = createFileRoute('/husbandry/feeding')({
   component: FeedingSchedulePage,
 });
 
-const getLocalDateString = () => new Date().toISOString().split('T')[0];
+// Architectural Fix: Safely fetch the local calendar date without UTC drift
+const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
 
 export function FeedingSchedulePage() {
   const queryClient = useQueryClient();
@@ -37,11 +39,9 @@ export function FeedingSchedulePage() {
   const { data: schedules = [], isLoading: loadingSchedules } = useQuery({ 
     queryKey: ['feeding_schedules'], 
     queryFn: async () => {
-      const maxDate = new Date();
-      maxDate.setDate(maxDate.getDate() + 30); 
-      const maxDateStr = maxDate.toISOString().split('T')[0];
+      // Safe 30-day forecast boundary
+      const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
 
-      // Removed the invalid .eq('is_completed', false) query
       const { data, error } = await supabase
         .from('feeding_schedules')
         .select('*')
@@ -64,6 +64,22 @@ export function FeedingSchedulePage() {
     staleTime: Infinity,
   });
 
+  const deleteSingleMutation = useMutation({
+    mutationFn: async (scheduleId: string) => {
+      if (!user?.id) throw new Error('Unauthorized');
+      await feedingService.deleteSchedule(scheduleId, user.id);
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
+  });
+
+  const deleteGroupMutation = useMutation({
+    mutationFn: async (scheduleIds: string[]) => {
+      if (!user?.id) throw new Error('Unauthorized');
+      await Promise.all(scheduleIds.map(id => feedingService.deleteSchedule(id, user.id)));
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
+  });
+
   const filteredAnimals = useMemo(() => 
     animals.filter(a => (a.category || '').toUpperCase() === activeTab),
   [animals, activeTab]);
@@ -83,11 +99,14 @@ export function FeedingSchedulePage() {
   const groupedSchedules = useMemo(() => {
       const groups = new Map();
       displayedSchedules.forEach(schedule => {
-          const key = `${schedule.animal_id}_${schedule.food_type}_${schedule.quantity}_${schedule.interval_days || 'single'}_${schedule.calci_dust}`;
+          const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
+          const supplementKey = schedule.supplements || 'none';
+          const key = `${schedule.animal_id}_${schedule.food_type}_${schedule.quantity}_${supplementKey}_${isNotRequired}`;
           
           if (!groups.has(key)) {
               groups.set(key, { 
-                  ...schedule, count: 1, end_date: schedule.scheduled_date, start_date: schedule.scheduled_date, child_ids: [schedule.id] 
+                  ...schedule, count: 1, end_date: schedule.scheduled_date, start_date: schedule.scheduled_date, child_ids: [schedule.id],
+                  feed_not_required: isNotRequired
               });
           } else {
               const existing = groups.get(key);
@@ -118,26 +137,25 @@ export function FeedingSchedulePage() {
         if (value.schedule_mode === 'single') {
             datesToSchedule.push(value.target_date);
         } else {
-            const [y, m, d] = value.target_date.split('-').map(Number);
-            const startDate = new Date(y, m - 1, d);
-
+            // Architectural Fix: DST-safe interval generation
+            const startDate = parseISO(value.target_date);
             for (let i = 0; i < value.occurrences; i++) {
-                const current = new Date(startDate);
-                current.setDate(startDate.getDate() + (i * value.interval_days));
-                datesToSchedule.push(current.toISOString().split('T')[0]);
+                const nextFeedDate = addDays(startDate, i * value.interval_days);
+                datesToSchedule.push(format(nextFeedDate, 'yyyy-MM-dd'));
             }
         }
 
-        const newSchedules = datesToSchedule.map(date => ({
+        const newSchedules: Partial<FeedingScheduleType>[] = datesToSchedule.map(date => ({
             animal_id: value.animal_id,
             scheduled_date: date,
             food_type: value.feed_not_required ? 'NOT REQUIRED' : value.food_type,
             quantity: value.feed_not_required ? 0 : value.quantity,
-            calci_dust: value.calci_dust,
-            feed_not_required: value.feed_not_required,
-            // Removed the invalid is_completed payload insertion
+            quantity_unit: 'item', 
+            status: 'PENDING',
+            supplements: value.calci_dust ? 'Calci-Dust' : null,
+            notes: value.feed_not_required ? 'FAST DAY / NOT REQUIRED' : null,
+            presentation_method: null,
             is_deleted: false,
-            interval_days: value.schedule_mode === 'interval' ? value.interval_days : null
         }));
 
         if (!user?.id) return;
@@ -335,36 +353,37 @@ export function FeedingSchedulePage() {
                           viewLayout === 'individual' ? (
                               displayedSchedules.map(schedule => {
                                   const animal = animals.find(a => a.id === schedule.animal_id);
-                                  const dateObj = new Date(schedule.scheduled_date);
+                                  const dateObj = parseISO(schedule.scheduled_date);
                                   const isToday = schedule.scheduled_date === getLocalDateString();
+                                  const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
 
                                   return (
                                       <tr key={schedule.id} className="hover:bg-slate-50 transition-colors group">
                                           <td className="px-6 py-4">
                                               <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md border text-[10px] font-black uppercase tracking-widest ${isToday ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
-                                                  <CalIcon size={12}/> {dateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                                  <CalIcon size={12}/> {format(dateObj, 'd MMM')}
                                               </div>
                                           </td>
                                           <td className="px-6 py-4">
                                               <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
                                           </td>
                                           <td className="px-6 py-4">
-                                              {schedule.feed_not_required ? (
+                                              {isNotRequired ? (
                                                 <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
                                               ) : (
                                                 <>
                                                   <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{schedule.quantity}x {schedule.food_type}</p>
-                                                  {schedule.calci_dust && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ Calci-Dust</span>}
+                                                  {schedule.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {schedule.supplements}</span>}
                                                 </>
                                               )}
                                           </td>
                                           <td className="px-6 py-4 text-right">
-                                              <button onClick={async () => {
-                                                  if (!user?.id) return;
-                                                  await feedingService.deleteSchedule(schedule.id!, user.id);
-                                                  queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
-                                              }} className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100">
-                                                  <Trash2 size={16} />
+                                              <button 
+                                                onClick={() => deleteSingleMutation.mutate(schedule.id!)}
+                                                disabled={deleteSingleMutation.isPending}
+                                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                                              >
+                                                  {deleteSingleMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                               </button>
                                           </td>
                                       </tr>
@@ -373,19 +392,19 @@ export function FeedingSchedulePage() {
                           ) : (
                               groupedSchedules.map((group, idx) => {
                                   const animal = animals.find(a => a.id === group.animal_id);
-                                  const startDateObj = new Date(group.start_date);
-                                  const endDateObj = new Date(group.end_date);
+                                  const startDateObj = parseISO(group.start_date);
+                                  const endDateObj = parseISO(group.end_date);
 
                                   return (
                                       <tr key={idx} className="hover:bg-slate-50 transition-colors group">
                                           <td className="px-6 py-4">
                                               <div className="flex flex-col gap-1">
                                                   <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
-                                                      Start: {startDateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                                      Start: {format(startDateObj, 'd MMM')}
                                                   </div>
                                                   {group.count > 1 && (
                                                       <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
-                                                          End: {endDateObj.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
+                                                          End: {format(endDateObj, 'd MMM')}
                                                       </div>
                                                   )}
                                               </div>
@@ -399,17 +418,18 @@ export function FeedingSchedulePage() {
                                               ) : (
                                                 <>
                                                   <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{group.quantity}x {group.food_type} <span className="text-slate-400">({group.count} feeds)</span></p>
-                                                  {group.calci_dust && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ Calci-Dust</span>}
+                                                  {group.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {group.supplements}</span>}
                                                 </>
                                               )}
                                           </td>
                                           <td className="px-6 py-4 text-right">
-                                              <button onClick={async () => {
-                                                  if (!user?.id) return;
-                                                  await Promise.all(group.child_ids.map((id: string) => feedingService.deleteSchedule(id, user.id)));
-                                                  queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
-                                              }} className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100" title="Delete entire group">
-                                                  <Trash2 size={16} />
+                                              <button 
+                                                onClick={() => deleteGroupMutation.mutate(group.child_ids)}
+                                                disabled={deleteGroupMutation.isPending}
+                                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50" 
+                                                title="Delete entire group"
+                                              >
+                                                  {deleteGroupMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                               </button>
                                           </td>
                                       </tr>

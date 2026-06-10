@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
+import { createContext, useContext, useEffect, useState, useRef, ReactNode, useCallback, useMemo } from 'react';
 import { Session, User } from '@supabase/supabase-js';
 import { useQuery } from '@tanstack/react-query';
 import { get, set, del } from 'idb-keyval';
@@ -32,7 +32,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isLocked, setIsLocked] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
 
-  // 1. Session Management (Online-First with IDB Failover)
+  // Architectural Fix: Safely reference timeouts and states without triggering re-renders
+  const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const isLockedRef = useRef(isLocked);
+
+  // Keep the ref strictly synced with state so our stable callbacks can read it
+  useEffect(() => {
+    isLockedRef.current = isLocked;
+  }, [isLocked]);
+
   useEffect(() => {
     const initializeAuth = async () => {
       try {
@@ -50,7 +58,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setSession(activeSession);
         setUser(activeSession?.user ?? null);
         
-        // Lock ONLY if we are rehydrating an existing session on app boot
         if (activeSession) setIsLocked(true); 
       } catch (error) {
         console.error('[Auth Engine] Initialization failed:', error);
@@ -61,19 +68,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     initializeAuth();
 
-    // Listen for login/logout events and sync to IndexedDB
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
       setSession(newSession);
       setUser(newSession?.user ?? null);
       
       if (newSession) {
         set('strix-auth-session', newSession);
-        
-        // CRITICAL FIX: Only let them straight in if they just actively logged in.
-        // Token refreshes or other background events will not trigger the lock screen.
-        if (event === 'SIGNED_IN') {
-          setIsLocked(false);
-        }
+        if (event === 'SIGNED_IN') setIsLocked(false);
       } else {
         del('strix-auth-session');
       }
@@ -82,12 +83,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => subscription.unsubscribe();
   }, []);
 
-  // 2. Profile Management (Cached via TanStack for Offline Unlock)
   const { data: profile, status: profileStatus } = useQuery({
     queryKey: ['userProfile', user?.id],
     queryFn: async () => {
       if (!user?.id) return null;
-      
       const { data, error } = await supabase
         .from('users')
         .select('id, name, initials, pin, role')
@@ -100,63 +99,66 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return data as UserProfile;
     },
     enabled: !!user?.id,
+    // Note: Persister is now handled globally in main.tsx, but leaving this is safe.
     meta: { persist: true }, 
   });
 
-  // 3. Idle Timer Logic
+  // Architectural Fix: This callback now has NO dependencies. It will never force a re-render.
   const resetIdleTimer = useCallback(() => {
-    if (isLocked) return;
-    if ((window as any).idleTimer) clearTimeout((window as any).idleTimer);
-    (window as any).idleTimer = setTimeout(() => setIsLocked(true), IDLE_TIMEOUT_MS);
-  }, [isLocked]);
+    if (isLockedRef.current) return;
+    if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+    idleTimerRef.current = setTimeout(() => setIsLocked(true), IDLE_TIMEOUT_MS);
+  }, []);
 
+  // Architectural Fix: Event listeners mount EXACTLY ONCE. No more DOM thrashing.
   useEffect(() => {
     const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
-    events.forEach(event => document.addEventListener(event, resetIdleTimer));
+    events.forEach(event => document.addEventListener(event, resetIdleTimer, { passive: true }));
+    
     resetIdleTimer();
+    
     return () => {
       events.forEach(event => document.removeEventListener(event, resetIdleTimer));
-      if ((window as any).idleTimer) clearTimeout((window as any).idleTimer);
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     };
   }, [resetIdleTimer]);
 
-  // 4. Local PIN Verification
-  const unlock = (enteredPin: string): boolean => {
-    if (!profile?.pin) {
-      console.warn('[Auth Engine] No PIN in cache. Waiting for sync...');
-      return false;
-    }
-    
+  const unlock = useCallback((enteredPin: string): boolean => {
+    if (!profile?.pin) return false;
     if (enteredPin === String(profile.pin)) {
       setIsLocked(false);
       resetIdleTimer();
       return true;
     }
-    
     return false;
-  };
+  }, [profile?.pin, resetIdleTimer]);
 
-  const logout = async () => {
+  const lock = useCallback(() => setIsLocked(true), []);
+
+  const logout = useCallback(async () => {
     await supabase.auth.signOut();
     await del('strix-auth-session');
     setSession(null);
     setUser(null);
     setIsLocked(false); 
-  };
+  }, []);
 
   const isFullyLoading = isSessionLoading || (!!user && profileStatus === 'pending');
 
+  // Architectural Fix: Memoize the context value so the app only re-renders when data actually changes
+  const contextValue = useMemo(() => ({
+    session,
+    user,
+    profile: profile || null,
+    isLocked,
+    unlock,
+    lock,
+    logout,
+    isLoading: isFullyLoading
+  }), [session, user, profile, isLocked, unlock, lock, logout, isFullyLoading]);
+
   return (
-    <AuthContext.Provider value={{ 
-      session, 
-      user, 
-      profile: profile || null, 
-      isLocked, 
-      unlock, 
-      lock: () => setIsLocked(true), 
-      logout, 
-      isLoading: isFullyLoading 
-    }}>
+    <AuthContext.Provider value={contextValue}>
       {children}
     </AuthContext.Provider>
   );

@@ -9,7 +9,7 @@ import { ImageUploader } from '../ui/ImageUploader';
 interface AnimalFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialData?: any; 
+  initialData?: Animal; 
 }
 
 const TABS = [
@@ -66,14 +66,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
   const saveAnimalMutation = useMutation({
     mutationFn: async (payload: Partial<Animal>) => {
       if (initialData?.id) {
-        // 1. Check if location changed for Internal Movement Audit
         const oldLocation = initialData.location;
         const newLocation = payload.location;
 
         const { data, error } = await supabase.from('animals').update(payload).eq('id', initialData.id).select().single();
         if (error) throw error;
 
-        // 2. Trigger Movement Log if a move occurred (matching new schema)
         if (oldLocation !== newLocation && newLocation !== undefined) {
            const { error: moveError } = await supabase.from('internal_movements').insert([{
               animal_id: initialData.id,
@@ -103,13 +101,13 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     },
     onMutate: async (newAnimal) => {
       await queryClient.cancelQueries({ queryKey: ['animals', 'dashboard'] });
-      const previousAnimals = queryClient.getQueryData(['animals', 'dashboard']);
+      const previousAnimals = queryClient.getQueryData<Animal[]>(['animals', 'dashboard']);
       
-      queryClient.setQueryData(['animals', 'dashboard'], (old: any) => {
+      queryClient.setQueryData(['animals', 'dashboard'], (old: Animal[] | undefined) => {
         if (initialData?.id) {
-          return old?.map((a: any) => a.id === initialData.id ? { ...a, ...newAnimal } : a) || [];
+          return old?.map((a) => a.id === initialData.id ? { ...a, ...newAnimal } : a) || [];
         } else {
-          const optimisticRecord = { ...newAnimal, id: crypto.randomUUID(), status: newAnimal.status || 'ON_DISPLAY' };
+          const optimisticRecord = { ...newAnimal, id: crypto.randomUUID(), status: newAnimal.status || 'ON_DISPLAY' } as Animal;
           return [...(old || []), optimisticRecord];
         }
       });
@@ -135,7 +133,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       name: initialData?.name || '', 
       species: initialData?.species || '', 
       latin_name: initialData?.latin_name || '', 
-      census_count: initialData?.census_count || (1 as number | ''), 
+      census_count: initialData?.census_count || 1, 
       category: initialData?.category || ('OWL' as AnimalCategory), 
       status: initialData?.status || ('ON_DISPLAY' as AnimalStatus), 
       gender: initialData?.gender || '', 
@@ -146,17 +144,17 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       microchip_id: initialData?.microchip_id || '', 
       ring_number: initialData?.ring_number || '', 
       has_no_id: initialData?.has_no_id || false, 
-      flying_weight: initialData?.flying_weight || ('' as number | ''), 
-      winter_weight: initialData?.winter_weight || ('' as number | ''), 
-      average_target_weight: initialData?.average_target_weight || ('' as number | ''), 
+      flying_weight: initialData?.flying_weight || '', 
+      winter_weight: initialData?.winter_weight || '', 
+      average_target_weight: initialData?.average_target_weight || '', 
       weight_unit: initialData?.weight_unit || 'g',
       
       ambient_temp_only: initialData?.ambient_temp_only || false, 
-      target_day_temp_c: initialData?.target_day_temp_c || ('' as number | ''), 
-      target_night_temp_c: initialData?.target_night_temp_c || ('' as number | ''), 
-      water_tipping_temp: initialData?.water_tipping_temp || ('' as number | ''), 
-      target_humidity_min_percent: initialData?.target_humidity_min_percent || ('' as number | ''), 
-      target_humidity_max_percent: initialData?.target_humidity_max_percent || ('' as number | ''), 
+      target_day_temp_c: initialData?.target_day_temp_c || '', 
+      target_night_temp_c: initialData?.target_night_temp_c || '', 
+      water_tipping_temp: initialData?.water_tipping_temp || '', 
+      target_humidity_min_percent: initialData?.target_humidity_min_percent || '', 
+      target_humidity_max_percent: initialData?.target_humidity_max_percent || '', 
       misting_frequency: initialData?.misting_frequency || '', 
       special_requirements: initialData?.special_requirements || '', 
       critical_husbandry_notes: initialData?.critical_husbandry_notes || '',
@@ -176,21 +174,23 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       sire_id: initialData?.sire_id || '', 
       dam_id: initialData?.dam_id || '', 
       description: initialData?.description || '', 
-      display_order: initialData?.display_order || ('' as number | '')
+      display_order: initialData?.display_order || ''
     },
     onSubmit: async ({ value }) => {
       setUploadErrorMsg(null);
-      const payload: any = { ...value };
+      
+      // Clone the raw values into a local mutable object to prepare for strict casting
+      const rawPayload = { ...value };
 
       try {
-        if (payload.profile_image_url instanceof Blob) {
-          payload.profile_image_url = await uploadToSupabase(payload.profile_image_url, 'profiles');
+        if (rawPayload.profile_image_url instanceof Blob) {
+          rawPayload.profile_image_url = await uploadToSupabase(rawPayload.profile_image_url, 'profiles');
         }
-        if (payload.distribution_map_url instanceof Blob) {
-          payload.distribution_map_url = await uploadToSupabase(payload.distribution_map_url, 'maps');
+        if (rawPayload.distribution_map_url instanceof Blob) {
+          rawPayload.distribution_map_url = await uploadToSupabase(rawPayload.distribution_map_url, 'maps');
         }
 
-        const convertToGrams = (weight: number | string | null, unit: string) => {
+        const convertToGrams = (weight: number | string | null, unit: string): number | null => {
           if (weight === '' || weight === null || weight === undefined) return null;
           const num = Number(weight);
           if (isNaN(num)) return null;
@@ -203,60 +203,91 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
           return Number(grams.toFixed(2));
         };
 
-        const unit = payload.weight_unit;
-        payload.flying_weight = convertToGrams(payload.flying_weight, unit);
-        payload.winter_weight = convertToGrams(payload.winter_weight, unit);
-        payload.average_target_weight = convertToGrams(payload.average_target_weight, unit);
-
-        const numericFields = [
-          'census_count', 'target_day_temp_c', 'target_night_temp_c', 'water_tipping_temp', 
-          'target_humidity_min_percent', 'target_humidity_max_percent', 'display_order'
-        ];
-        numericFields.forEach(field => { 
-          payload[field] = payload[field] === '' ? null : Number(payload[field]); 
-        });
-
-        const stringOrNullFields = [
-          'parent_group_id', 'location', 'latin_name', 'date_of_birth', 'acquisition_date', 
-          'sire_id', 'dam_id', 'profile_image_url', 'distribution_map_url'
-        ];
-        stringOrNullFields.forEach(field => { 
-          payload[field] = payload[field] === '' ? null : payload[field]; 
-        });
+        const unit = rawPayload.weight_unit;
         
-        if (payload.record_type === 'GROUP') {
-          payload.parent_group_id = null;
-        }
+        // Strict Type Casting Map
+        const payload: Partial<Animal> = {
+          record_type: rawPayload.record_type,
+          parent_group_id: rawPayload.record_type === 'GROUP' || rawPayload.parent_group_id === '' ? null : rawPayload.parent_group_id,
+          location: rawPayload.location === '' ? null : rawPayload.location,
+          name: rawPayload.name,
+          species: rawPayload.species,
+          latin_name: rawPayload.latin_name === '' ? null : rawPayload.latin_name,
+          census_count: Number(rawPayload.census_count),
+          category: rawPayload.category as AnimalCategory,
+          status: rawPayload.status as AnimalStatus,
+          gender: rawPayload.gender,
+          date_of_birth: rawPayload.date_of_birth === '' ? null : rawPayload.date_of_birth,
+          is_dob_unknown: rawPayload.is_dob_unknown,
+          profile_image_url: rawPayload.profile_image_url as string | null,
+          
+          microchip_id: rawPayload.microchip_id,
+          ring_number: rawPayload.ring_number,
+          has_no_id: rawPayload.has_no_id,
+          flying_weight: convertToGrams(rawPayload.flying_weight, unit),
+          winter_weight: convertToGrams(rawPayload.winter_weight, unit),
+          average_target_weight: convertToGrams(rawPayload.average_target_weight, unit),
+          weight_unit: rawPayload.weight_unit,
+          
+          ambient_temp_only: rawPayload.ambient_temp_only,
+          target_day_temp_c: rawPayload.target_day_temp_c === '' ? null : Number(rawPayload.target_day_temp_c),
+          target_night_temp_c: rawPayload.target_night_temp_c === '' ? null : Number(rawPayload.target_night_temp_c),
+          water_tipping_temp: rawPayload.water_tipping_temp === '' ? null : Number(rawPayload.water_tipping_temp),
+          target_humidity_min_percent: rawPayload.target_humidity_min_percent === '' ? null : Number(rawPayload.target_humidity_min_percent),
+          target_humidity_max_percent: rawPayload.target_humidity_max_percent === '' ? null : Number(rawPayload.target_humidity_max_percent),
+          misting_frequency: rawPayload.misting_frequency,
+          special_requirements: rawPayload.special_requirements,
+          critical_husbandry_notes: rawPayload.critical_husbandry_notes,
+          
+          hazard_rating: rawPayload.hazard_rating,
+          is_venomous: rawPayload.is_venomous,
+          red_list_status: rawPayload.red_list_status,
+          acquisition_date: rawPayload.acquisition_date === '' ? null : rawPayload.acquisition_date,
+          acquisition_type: rawPayload.acquisition_type,
+          origin: rawPayload.origin,
+          origin_location: rawPayload.origin_location,
+          is_boarding: rawPayload.is_boarding,
+          is_quarantine: rawPayload.is_quarantine,
+          distribution_map_url: rawPayload.distribution_map_url as string | null,
+          
+          lineage_unknown: rawPayload.lineage_unknown,
+          sire_id: rawPayload.sire_id === '' ? null : rawPayload.sire_id,
+          dam_id: rawPayload.dam_id === '' ? null : rawPayload.dam_id,
+          description: rawPayload.description,
+          display_order: rawPayload.display_order === '' ? 0 : Number(rawPayload.display_order)
+        };
 
         await saveAnimalMutation.mutateAsync(payload);
         onClose();
 
-      } catch (err: any) {
+      } catch (err: unknown) {
+        const errorMessage = err instanceof Error ? err.message : "Failed to process form uploads.";
         console.error("Submission Sequence Failed:", err);
-        setUploadErrorMsg(err.message || "Failed to process form uploads.");
+        setUploadErrorMsg(errorMessage);
       }
     },
   });
 
   if (!isOpen) return null;
 
-  const TextInput = ({ name, label, type = 'text', placeholder }: { name: any, label: string, type?: 'text' | 'number' | 'date' | 'textarea', placeholder?: string }) => (
-    <form.Field name={name}>
+  // Type-Safe Sub Components
+  const TextInput = ({ name, label, type = 'text', placeholder }: { name: Extract<keyof typeof form.state.values, string>, label: string, type?: 'text' | 'number' | 'date' | 'textarea', placeholder?: string }) => (
+    <form.Field name={name as any}>
       {(field) => (
         <div className="flex flex-col gap-1.5">
           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
           {type === 'textarea' ? (
             <textarea
               value={field.state.value as string}
-              onChange={(e) => field.handleChange(e.target.value as any)}
+              onChange={(e) => field.handleChange(e.target.value)}
               placeholder={placeholder}
               className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm h-24 custom-scrollbar"
             />
           ) : (
             <input
               type={type}
-              value={field.state.value as any}
-              onChange={(e) => field.handleChange(type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) as any : e.target.value as any)}
+              value={field.state.value as string | number}
+              onChange={(e) => field.handleChange(type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)}
               placeholder={placeholder}
               className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm"
             />
@@ -266,14 +297,14 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     </form.Field>
   );
 
-  const SelectInput = ({ name, label, options }: { name: any, label: string, options: { value: string, label: string }[] }) => (
-    <form.Field name={name}>
+  const SelectInput = ({ name, label, options }: { name: Extract<keyof typeof form.state.values, string>, label: string, options: { value: string, label: string }[] }) => (
+    <form.Field name={name as any}>
       {(field) => (
         <div className="flex flex-col gap-1.5">
           <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
           <select
             value={field.state.value as string}
-            onChange={(e) => field.handleChange(e.target.value as any)}
+            onChange={(e) => field.handleChange(e.target.value)}
             className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm"
           >
             {options.map((opt) => (
@@ -285,14 +316,14 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     </form.Field>
   );
 
-  const CheckboxInput = ({ name, label }: { name: any, label: string }) => (
-    <form.Field name={name}>
+  const CheckboxInput = ({ name, label }: { name: Extract<keyof typeof form.state.values, string>, label: string }) => (
+    <form.Field name={name as any}>
       {(field) => (
         <label className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
           <input
             type="checkbox"
             checked={field.state.value as boolean}
-            onChange={(e) => field.handleChange(e.target.checked as any)}
+            onChange={(e) => field.handleChange(e.target.checked)}
             className="w-4 h-4 text-emerald-600 rounded border-slate-300 focus:ring-emerald-500"
           />
           <span className="text-xs font-bold text-slate-700 tracking-wide">{label}</span>
