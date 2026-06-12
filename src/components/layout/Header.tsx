@@ -1,82 +1,101 @@
-import React, { useState } from 'react';
-import { Menu, Play, Square, Loader2 } from 'lucide-react';
+import React from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Menu, UserCircle, PlayCircle, StopCircle, Loader2 } from 'lucide-react';
+import { format } from 'date-fns';
 import { useAuth } from '../../lib/auth';
+import { timesheetService } from '../../services/timesheetService';
 
 interface HeaderProps {
-  toggleSidebar: () => void;
-  isSidebarOpen: boolean;
+  onMenuClick: () => void;
 }
 
-export function Header({ toggleSidebar, isSidebarOpen }: HeaderProps) {
-  const { user } = useAuth(); 
-  const [isProcessing, setIsProcessing] = useState(false);
+export function Header({ onMenuClick }: HeaderProps) {
+  const queryClient = useQueryClient();
+  const { user, profile } = useAuth();
 
-  // TEMPORARY STUBS: These will be wired up in Phase 4 when we build the Mutation Queue
-  const pendingMutations = 0;
-  const activeShift = null;
-  const checkingShift = false;
+  // Globally check if the user is currently clocked in
+  const { data: activeShift, isLoading: isLoadingShift } = useQuery({
+    queryKey: ['my_active_shift', user?.id],
+    queryFn: () => timesheetService.getMyActiveShift(user!.id),
+    enabled: !!user?.id,
+  });
 
-  const handleClockAction = async () => {
-    if (!user?.id) return;
-    setIsProcessing(true);
-    
-    // Stub timeout to simulate visual interaction without actual API calls yet
-    setTimeout(() => {
-      setIsProcessing(false);
-    }, 500);
-  };
+  const clockInMutation = useMutation({
+    mutationFn: async () => {
+      const now = new Date();
+      await timesheetService.clockIn({
+        shift_date: format(now, 'yyyy-MM-dd'),
+        clock_in_time: now.toISOString()
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my_active_shift'] });
+      queryClient.invalidateQueries({ queryKey: ['timesheets'] });
+      queryClient.invalidateQueries({ queryKey: ['active_timesheets_rollcall'] });
+    }
+  });
+
+  const clockOutMutation = useMutation({
+    mutationFn: async (id: string) => {
+      await timesheetService.clockOut(id, new Date().toISOString());
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['my_active_shift'] });
+      queryClient.invalidateQueries({ queryKey: ['timesheets'] });
+      queryClient.invalidateQueries({ queryKey: ['active_timesheets_rollcall'] });
+    }
+  });
 
   return (
-    <header className="h-16 bg-slate-100 border-b border-slate-200 flex items-center justify-between px-6 shrink-0 z-10 sticky top-0 transition-all duration-300">
-      
-      {/* LEFT SIDE: Toggle, Shift Controls & Sync Status */}
+    <header className="bg-white border-b border-slate-200 h-16 flex items-center justify-between px-4 sm:px-6 sticky top-0 z-30">
+      <div className="flex items-center gap-4">
+        <button 
+          onClick={onMenuClick}
+          className="lg:hidden p-2 -ml-2 text-slate-500 hover:text-slate-900 transition-colors"
+        >
+          <Menu size={24} />
+        </button>
+      </div>
+
       <div className="flex items-center gap-4">
         
-        {/* SIDEBAR TOGGLE BUTTON */}
-        <button 
-          onClick={toggleSidebar}
-          className="p-2 -ml-2 text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-lg transition-colors"
-          aria-label="Toggle Sidebar"
-        >
-          <Menu size={20} />
-        </button>
+        {/* Global Clock-In/Out Widget */}
+        <div className="hidden sm:flex items-center">
+          {isLoadingShift ? (
+            <div className="px-4 py-1.5 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-center min-w-[120px]">
+               <Loader2 size={14} className="animate-spin text-slate-400" />
+            </div>
+          ) : activeShift ? (
+            <button 
+              onClick={() => clockOutMutation.mutate(activeShift.id)}
+              disabled={clockOutMutation.isPending}
+              className="group flex items-center gap-2 px-4 py-1.5 bg-rose-50 border border-rose-200 text-rose-700 hover:bg-rose-600 hover:text-white rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm disabled:opacity-50"
+            >
+              {clockOutMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <StopCircle size={14} className="group-hover:animate-pulse" />}
+              Clock Out
+            </button>
+          ) : (
+            <button 
+              onClick={() => clockInMutation.mutate()}
+              disabled={clockInMutation.isPending}
+              className="group flex items-center gap-2 px-4 py-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-600 hover:text-white rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm disabled:opacity-50"
+            >
+              {clockInMutation.isPending ? <Loader2 size={14} className="animate-spin" /> : <PlayCircle size={14} />}
+              Clock In
+            </button>
+          )}
+        </div>
 
-        {user?.id && (
-          <button 
-            onClick={handleClockAction}
-            disabled={isProcessing || checkingShift}
-            className={`flex items-center gap-2 px-5 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all disabled:opacity-50 ${
-              activeShift 
-                ? 'bg-rose-100 hover:bg-rose-200 text-rose-700 border border-rose-200' 
-                : 'bg-emerald-100 hover:bg-emerald-200 text-emerald-700 border border-emerald-200'
-            }`}
-          >
-            {isProcessing || checkingShift ? <Loader2 size={14} className="animate-spin" /> : activeShift ? <Square size={14} /> : <Play size={14} />}
-            {activeShift ? 'Clock Out' : 'Clock In'}
-          </button>
-        )}
-
-        {/* OFFLINE SYNC BADGE */}
-        {pendingMutations > 0 && (
-          <div className="flex items-center gap-2 px-3 py-1.5 bg-amber-100 border border-amber-200 rounded-xl">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
-            </span>
-            <span className="text-[10px] font-black text-amber-700 uppercase tracking-widest">
-              Sync Pending ({pendingMutations})
-            </span>
+        <div className="flex items-center gap-3 pl-4 border-l border-slate-200">
+          <div className="hidden md:block text-right">
+            <p className="text-xs font-black text-slate-900 uppercase tracking-tight">{profile?.name || 'Loading...'}</p>
+            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{profile?.role || 'Staff'}</p>
           </div>
-        )}
+          <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500 overflow-hidden">
+            <UserCircle size={32} strokeWidth={1} />
+          </div>
+        </div>
       </div>
-
-      {/* RIGHT SIDE: User Info ONLY */}
-      <div className="flex items-center gap-4">
-        <span className="text-slate-500 font-bold text-xs uppercase tracking-widest hidden sm:block">
-          {user?.email || 'Academy Staff'}
-        </span>
-      </div>
-      
     </header>
   );
 }

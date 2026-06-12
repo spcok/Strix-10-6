@@ -11,7 +11,27 @@ import { useAuth } from '../lib/auth';
 import { dailyRoundsService } from '../services/dailyRoundsService';
 import { Animal, DailyRound } from '../types';
 
+// Architectural Fix: Route Loader pre-fetches default rounds
 export const Route = createFileRoute('/husbandry/rounds')({
+  loader: async ({ context: { queryClient } }) => {
+    const today = format(new Date(), 'yyyy-MM-dd');
+    const defaultShift = 'Morning';
+    
+    await Promise.all([
+      queryClient.ensureQueryData({
+        queryKey: ['animals', 'dashboard'],
+        queryFn: async () => {
+          const { data, error } = await supabase.from('animals').select('*').order('name');
+          if (error) throw error;
+          return data as Animal[];
+        }
+      }),
+      queryClient.ensureQueryData({
+        queryKey: ['daily_rounds', today, defaultShift],
+        queryFn: () => dailyRoundsService.getRoundsByDateAndShift(today, defaultShift)
+      })
+    ]);
+  },
   component: DailyRoundsPage,
 });
 
@@ -29,7 +49,6 @@ export function DailyRoundsPage() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
   
-  // Safe local date formatting
   const [selectedDate, setSelectedDate] = useState<string>(
     format(new Date(), 'yyyy-MM-dd')
   );
@@ -113,7 +132,6 @@ export function DailyRoundsPage() {
   }, [animals, rounds, activeSection, draftRounds]);
 
   const shiftDate = (days: number) => {
-    // Safe date math using date-fns
     const current = parseISO(selectedDate);
     const nextDate = addDays(current, days);
     setSelectedDate(format(nextDate, 'yyyy-MM-dd'));

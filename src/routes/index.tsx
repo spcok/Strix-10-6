@@ -4,16 +4,15 @@ import { supabase } from '../lib/supabase';
 import Dashboard from '../components/dashboard/Dashboard';
 
 export const Route = createFileRoute('/')({
-  // The loader intercepts the routing event and pre-fetches data before the component mounts
   loader: async ({ context: { queryClient } }) => {
     const today = format(new Date(), 'yyyy-MM-dd');
 
-    // We use Promise.all to fetch all four dashboard datasets in parallel
     await Promise.all([
       queryClient.ensureQueryData({
         queryKey: ['animals', 'dashboard'],
         queryFn: async () => {
-          const { data, error } = await supabase.from('animals').select('id, status, category');
+          // Pulled the full object so downstream components have access to names
+          const { data, error } = await supabase.from('animals').select('*');
           if (error) throw error;
           return data;
         },
@@ -35,7 +34,6 @@ export const Route = createFileRoute('/')({
       queryClient.ensureQueryData({
         queryKey: ['daily_logs', 'dashboard', today],
         queryFn: async () => {
-          // Note: using gte and lte to capture the whole day regardless of timestamp hours
           const { data, error } = await supabase
             .from('daily_logs')
             .select('*')

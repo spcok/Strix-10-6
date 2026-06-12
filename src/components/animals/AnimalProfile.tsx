@@ -237,7 +237,10 @@ export function AnimalProfile({ animal, onClose }: AnimalProfileProps) {
                       </thead>
                       <tbody className="divide-y divide-slate-100 text-xs font-bold text-slate-700">
                         {husbandryLogs.map((log) => {
-                          const meals = log.feed_details?.meals || [];
+                          const feedDetailsParsed = typeof log.feed_details === 'string'
+                            ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })()
+                            : log.feed_details;
+                          const meals = feedDetailsParsed?.meals || [];
                           return (
                             <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
                               <td className="px-4 py-3 whitespace-nowrap text-slate-400">

@@ -9,11 +9,45 @@ import { useAuth } from '../lib/auth';
 import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
 import { feedingService } from '../services/feedingService';
 
+// Architectural Fix: Route Loader pre-fetches all feeding dependencies
 export const Route = createFileRoute('/husbandry/feeding')({
+  loader: async ({ context: { queryClient } }) => {
+    const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
+    
+    await Promise.all([
+      queryClient.ensureQueryData({
+        queryKey: ['animals', 'dashboard'],
+        queryFn: async () => {
+          const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
+          if (error) throw error;
+          return data as Animal[];
+        }
+      }),
+      queryClient.ensureQueryData({
+        queryKey: ['feeding_schedules'],
+        queryFn: async () => {
+          const { data, error } = await supabase
+            .from('feeding_schedules')
+            .select('*')
+            .eq('is_deleted', false)
+            .lte('scheduled_date', maxDateStr);
+          if (error) throw error;
+          return data as FeedingScheduleType[];
+        }
+      }),
+      queryClient.ensureQueryData({
+        queryKey: ['operational_lists', 'FOOD_TYPE'],
+        queryFn: async () => {
+          const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
+          if (error) throw error;
+          return data as OperationalList[];
+        }
+      })
+    ]);
+  },
   component: FeedingSchedulePage,
 });
 
-// Architectural Fix: Safely fetch the local calendar date without UTC drift
 const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
 
 export function FeedingSchedulePage() {
@@ -29,7 +63,7 @@ export function FeedingSchedulePage() {
   const { data: animals = [], isLoading: loadingAnimals } = useQuery({ 
     queryKey: ['animals', 'dashboard'], 
     queryFn: async () => {
-      const { data, error } = await supabase.from('animals').select('*').neq('status', 'ARCHIVED');
+      const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
       if (error) throw error;
       return data as Animal[];
     },
@@ -39,15 +73,12 @@ export function FeedingSchedulePage() {
   const { data: schedules = [], isLoading: loadingSchedules } = useQuery({ 
     queryKey: ['feeding_schedules'], 
     queryFn: async () => {
-      // Safe 30-day forecast boundary
       const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
-
       const { data, error } = await supabase
         .from('feeding_schedules')
         .select('*')
         .eq('is_deleted', false)
         .lte('scheduled_date', maxDateStr); 
-        
       if (error) throw error;
       return data as FeedingScheduleType[];
     },
@@ -137,7 +168,6 @@ export function FeedingSchedulePage() {
         if (value.schedule_mode === 'single') {
             datesToSchedule.push(value.target_date);
         } else {
-            // Architectural Fix: DST-safe interval generation
             const startDate = parseISO(value.target_date);
             for (let i = 0; i < value.occurrences; i++) {
                 const nextFeedDate = addDays(startDate, i * value.interval_days);

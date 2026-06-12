@@ -202,7 +202,10 @@ export function DailyLogsPage() {
                   </tr>
                 ) : (
                   filteredWorksheetRecords.map(({ animal, log }) => {
-                    const meals = log?.feed_details?.meals || [];
+                    const feedDetailsParsed = typeof log?.feed_details === 'string'
+                      ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })()
+                      : log?.feed_details;
+                    const meals = feedDetailsParsed?.meals || [];
                     const logTimeStr = log?.log_date ? new Date(log.log_date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
                     
                     return (

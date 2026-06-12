@@ -5,25 +5,56 @@ import { ArrowRightLeft, Loader2, Calendar, Filter, MapPin, FileText } from 'luc
 import { supabase } from '../lib/supabase';
 import { Animal, InternalMovement, OperationalList } from '../types';
 
+// Architectural Fix: Route Loader pre-fetches internal logistics
 export const Route = createFileRoute('/logistics/internal-movements')({
+  loader: async ({ context: { queryClient } }) => {
+    await Promise.all([
+      queryClient.ensureQueryData({
+        queryKey: ['animals', 'dashboard'],
+        queryFn: async () => {
+          const { data, error } = await supabase.from('animals').select('*');
+          if (error) throw error;
+          return data as Animal[];
+        }
+      }),
+      queryClient.ensureQueryData({
+        queryKey: ['operational_lists', 'LOCATION'],
+        queryFn: async () => {
+          const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'LOCATION').eq('is_deleted', false);
+          if (error) throw error;
+          return data as OperationalList[];
+        }
+      }),
+      queryClient.ensureQueryData({
+        queryKey: ['internal_movements'],
+        queryFn: async () => {
+          const { data, error } = await supabase
+            .from('internal_movements')
+            .select('*')
+            .eq('is_deleted', false)
+            .order('movement_date', { ascending: false });
+          if (error) throw error;
+          return data as InternalMovement[];
+        }
+      })
+    ]);
+  },
   component: InternalMovementsPage,
 });
 
 export function InternalMovementsPage() {
   const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
 
-  // Warm Cache Animal Dock
   const { data: animals = [], isLoading: loadingAnimals } = useQuery({
     queryKey: ['animals', 'dashboard'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('animals').select('*').neq('is_deleted', true);
+      const { data, error } = await supabase.from('animals').select('*');
       if (error) throw error;
       return data as Animal[];
     },
     staleTime: Infinity
   });
 
-  // Location Metadata List
   const { data: locations = [] } = useQuery({
     queryKey: ['operational_lists', 'LOCATION'],
     queryFn: async () => {
@@ -34,7 +65,6 @@ export function InternalMovementsPage() {
     staleTime: Infinity
   });
 
-  // Ledger query mapped strictly to schema
   const { data: movements = [], isLoading: loadingMovements } = useQuery({
     queryKey: ['internal_movements'],
     queryFn: async () => {
@@ -60,7 +90,6 @@ export function InternalMovementsPage() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-32">
-      {/* Header Banner */}
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
         <div>
           <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
@@ -69,7 +98,6 @@ export function InternalMovementsPage() {
           <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Enclosure Location Auditing (ZLA compliance)</p>
         </div>
 
-        {/* Global Filter Bar */}
         <div className="flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
           <Filter size={14} className="text-slate-400 ml-2" />
           <select value={filterAnimalId} onChange={(e) => setFilterAnimalId(e.target.value)} className={inputClass}>
@@ -79,7 +107,6 @@ export function InternalMovementsPage() {
         </div>
       </div>
 
-      {/* Main Ledger Table */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-12rem)] min-h-[500px]">
         <div className="flex-1 overflow-y-auto relative">
           {(loadingMovements || loadingAnimals) && (

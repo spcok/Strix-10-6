@@ -1,12 +1,15 @@
 import { useState, useEffect } from 'react';
-import { createRootRoute, Outlet } from '@tanstack/react-router';
+import { createRootRouteWithContext, Outlet } from '@tanstack/react-router';
+import { QueryClient } from '@tanstack/react-query';
 import { Lock, Delete, LogIn } from 'lucide-react';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { supabase } from '../lib/supabase';
 import { Sidebar } from '../components/layout/Sidebar';
 import { Header } from '../components/layout/Header';
 
-export const Route = createRootRoute({
+export const Route = createRootRouteWithContext<{
+  queryClient: QueryClient;
+}>()({
   component: () => (
     <AuthProvider>
       <AuthGuard />

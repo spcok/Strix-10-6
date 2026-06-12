@@ -30,7 +30,10 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
   useEffect(() => {
     if (mode === 'FEEDING') {
-      const existingMeals = initialLogData?.feed_details?.meals || [];
+      const feedDetailsParsed = typeof initialLogData?.feed_details === 'string'
+        ? (() => { try { return JSON.parse(initialLogData.feed_details); } catch { return null; } })()
+        : initialLogData?.feed_details;
+      const existingMeals = feedDetailsParsed?.meals || [];
       if (existingMeals.length > 0) {
         setMealsList(
           existingMeals.map((m: any) => ({

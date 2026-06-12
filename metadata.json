@@ -1,6 +1,6 @@
 {
   "name": "StrixOS - New Version",
-  "description": "",
+  "description": "Advanced Husbandry, Feeding, Logistics, and Safety Management System",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
