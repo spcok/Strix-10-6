@@ -13,7 +13,6 @@ export function Header({ onMenuClick }: HeaderProps) {
   const queryClient = useQueryClient();
   const { user, profile } = useAuth();
 
-  // Globally check if the user is currently clocked in
   const { data: activeShift, isLoading: isLoadingShift } = useQuery({
     queryKey: ['my_active_shift', user?.id],
     queryFn: () => timesheetService.getMyActiveShift(user!.id),
@@ -51,15 +50,13 @@ export function Header({ onMenuClick }: HeaderProps) {
       <div className="flex items-center gap-4">
         <button 
           onClick={onMenuClick}
-          className="lg:hidden p-2 -ml-2 text-slate-500 hover:text-slate-900 transition-colors"
+          className="p-2 -ml-2 text-slate-500 hover:text-slate-900 transition-colors rounded-lg hover:bg-slate-100"
         >
           <Menu size={24} />
         </button>
       </div>
 
       <div className="flex items-center gap-4">
-        
-        {/* Global Clock-In/Out Widget */}
         <div className="hidden sm:flex items-center">
           {isLoadingShift ? (
             <div className="px-4 py-1.5 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-center min-w-[120px]">

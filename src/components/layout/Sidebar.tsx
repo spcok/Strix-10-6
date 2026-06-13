@@ -55,6 +55,7 @@ const navGroups = [
       { name: 'Holiday Requests', to: '/staff/holidays', icon: CalendarHeart },
       { name: 'ZLA Compliance', to: '/staff/zla', icon: FileBadge },
       { name: 'Missing Records', to: '/staff/missing', icon: FileWarning },
+      { name: 'Staff Shifts', to: '/staff/shifts', icon: Wrench },
     ]
   },
   {

@@ -6,7 +6,7 @@ import { Wrench, Plus, X, Search, Save, Loader2, AlertCircle, HardHat, Calendar 
 import { format, parseISO } from 'date-fns';
 import { maintenanceService } from '../services/maintenanceService';
 
-export const Route = createFileRoute('/maintenance/tickets')({
+export const Route = createFileRoute('/safety/maintenance')({
   loader: async ({ context: { queryClient } }) => {
     await Promise.all([
       queryClient.ensureQueryData({
