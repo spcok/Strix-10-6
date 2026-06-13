@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -10,24 +10,16 @@ export const Route = createFileRoute('/staff/missing-records')({
   component: MissingRecordsPage,
 });
 
+// Hardcoded operational categories
+const SECTIONS = ['owl', 'raptor', 'mammal'];
+
 export function MissingRecordsPage() {
   const [baseDate, setBaseDate] = useState(new Date());
-  const [selectedSection, setSelectedSection] = useState<string | null>(null);
+  
+  // Synchronous default state (Bypasses the TanStack useQuery hang)
+  const [selectedSection, setSelectedSection] = useState<string>(SECTIONS[0]);
 
-  // 1. Fetch available sections dynamically
-  const { data: sections = [], isLoading: isLoadingSections } = useQuery({
-    queryKey: ['audit_sections'],
-    queryFn: () => auditService.getValidSections(),
-  });
-
-  // Enforce the "No All View" rule by defaulting to the first available section
-  useEffect(() => {
-    if (sections.length > 0 && !selectedSection) {
-      setSelectedSection(sections[0]);
-    }
-  }, [sections, selectedSection]);
-
-  // 2. Calculate strict 7-day window
+  // Calculate strict 7-day window
   const weekStart = startOfWeek(baseDate, { weekStartsOn: 1 });
   const weekEnd = endOfWeek(baseDate, { weekStartsOn: 1 });
   const daysInView = useMemo(() => eachDayOfInterval({ start: weekStart, end: weekEnd }), [weekStart, weekEnd]);
@@ -35,15 +27,12 @@ export function MissingRecordsPage() {
   const startStr = format(weekStart, 'yyyy-MM-dd');
   const endStr = format(weekEnd, 'yyyy-MM-dd');
 
-  // 3. Fetch audit data based on selected section
-  const { data, isLoading: isLoadingAudit } = useQuery({
+  // Fetch audit data based on selected section
+  const { data, isLoading } = useQuery({
     queryKey: ['audit_records', startStr, endStr, selectedSection],
-    queryFn: () => auditService.getAuditData(startStr, endStr, selectedSection!),
-    enabled: !!selectedSection, // Only run if a section is selected
+    queryFn: () => auditService.getAuditData(startStr, endStr, selectedSection),
     staleTime: 1000 * 60 * 5,
   });
-
-  const isLoading = isLoadingSections || isLoadingAudit;
 
   // O(1) Dictionary for Logs
   const logMap = useMemo(() => {
@@ -93,28 +82,24 @@ export function MissingRecordsPage() {
         </div>
       </div>
 
-      {/* Dynamic Section Controls */}
+      {/* Synchronous Section Controls */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-2 px-3 py-2 bg-slate-100 rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200">
           <Layers size={14} /> Filter Section:
         </div>
-        {sections.length === 0 && !isLoadingSections ? (
-           <span className="text-xs font-bold text-slate-400 uppercase tracking-widest px-2">No sections found.</span>
-        ) : (
-          sections.map(section => (
-            <button
-              key={section}
-              onClick={() => setSelectedSection(section)}
-              className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm border ${
-                selectedSection === section 
-                  ? 'bg-indigo-600 border-indigo-600 text-white' 
-                  : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-              }`}
-            >
-              {section}
-            </button>
-          ))
-        )}
+        {SECTIONS.map(section => (
+          <button
+            key={section}
+            onClick={() => setSelectedSection(section)}
+            className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm border ${
+              selectedSection === section 
+                ? 'bg-indigo-600 border-indigo-600 text-white' 
+                : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+          >
+            {section}
+          </button>
+        ))}
       </div>
 
       {/* Grid Header & Key */}
@@ -191,27 +176,20 @@ export function MissingRecordsPage() {
                       const dateKey = format(date, 'yyyy-MM-dd');
                       const log = logMap[`${animal.id}_${dateKey}`];
                       
-                      // Business Logic Evaluation applies universally to selected sections
+                      // Shared Business Logic
                       const hasLog = !!log;
                       const weightValid = hasLog && (log.weight > 0 || log.weight_not_required === true);
                       const feedValid = hasLog && log.fed === true;
 
                       return (
                         <div key={i} className="flex-1 p-2 border-r border-slate-100 flex items-center justify-center">
-                          
-                          {/* The Split Pillbox Component */}
                           <div className="w-full max-w-[80px] h-8 flex rounded-lg overflow-hidden shadow-sm border border-slate-200 bg-slate-100" title={`W: Weight | F: Feed\nDate: ${dateKey}`}>
-                            
-                            {/* Weight Hemisphere */}
                             <div className={`w-1/2 flex items-center justify-center border-r border-white/20 transition-colors ${weightValid ? 'bg-emerald-500' : 'bg-rose-500'}`}>
                               <span className="text-[10px] font-black text-white/90">W</span>
                             </div>
-                            
-                            {/* Feed Hemisphere */}
                             <div className={`w-1/2 flex items-center justify-center transition-colors ${feedValid ? 'bg-emerald-500' : 'bg-rose-500'}`}>
                               <span className="text-[10px] font-black text-white/90">F</span>
                             </div>
-
                           </div>
                         </div>
                       );
