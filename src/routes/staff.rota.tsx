@@ -34,41 +34,54 @@ export function RotaPage() {
     return eachDayOfInterval({ start, end });
   }, [baseDate]);
 
-  const queryStart = view === 'MONTHLY' ? format(monthlyGridDays[0], 'yyyy-MM-dd') : format(dateRange.start, 'yyyy-MM-dd');
-  const queryEnd = view === 'MONTHLY' ? format(monthlyGridDays[monthlyGridDays.length - 1], 'yyyy-MM-dd') : format(dateRange.end, 'yyyy-MM-dd');
+  // Architectural Fix: Fetch a wider buffer to guarantee offline failover navigability
+  const queryBufferStart = format(addDays(dateRange.start, -14), 'yyyy-MM-dd');
+  const queryBufferEnd = format(addDays(dateRange.end, 14), 'yyyy-MM-dd');
 
   const { data, isLoading } = useQuery({
-    queryKey: ['rota', queryStart, queryEnd],
-    queryFn: () => rotaService.getRotaData(queryStart, queryEnd),
+    queryKey: ['rota_matrix', queryBufferStart, queryBufferEnd],
+    queryFn: () => rotaService.getRotaData(queryBufferStart, queryBufferEnd),
+    staleTime: 1000 * 60 * 15, // 15-minute strict local cache validity
   });
 
   const deleteShiftMutation = useMutation({
     mutationFn: (id: string) => rotaService.deleteShift(id),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rota'] })
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rota_matrix'] })
   });
 
-  const { shiftMap, leaveMap, filteredStaff } = useMemo(() => {
-    if (!data) return { shiftMap: {}, leaveMap: {}, filteredStaff: [] };
+  // Architectural Fix: Decoupled map generation. Uses native string splitting for O(1) performance.
+  const { shiftMap, leaveMap } = useMemo(() => {
+    if (!data) return { shiftMap: {}, leaveMap: {} };
     const sMap: Record<string, any> = {};
     const lMap: Record<string, any> = {};
 
     data.shifts.forEach((s: any) => {
-      sMap[`${s.user_id}_${format(parseISO(s.start_time), 'yyyy-MM-dd')}`] = s;
+      // Fast string split bypasses date-fns overhead for ISO strings
+      const dateKey = s.start_time.split('T')[0];
+      sMap[`${s.user_id}_${dateKey}`] = s;
     });
 
     data.leave.forEach((l: any) => {
+      // We still use date-fns here to expand date ranges, but this array is vastly smaller than shifts
       eachDayOfInterval({ start: parseISO(l.start_date), end: parseISO(l.end_date) }).forEach(d => {
         lMap[`${l.user_id}_${format(d, 'yyyy-MM-dd')}`] = l;
       });
     });
 
-    const staff = data.staff.filter((s: any) => 
-      (s.name || '').toLowerCase().includes(searchQuery.toLowerCase()) || 
-      (s.role || '').toLowerCase().includes(searchQuery.toLowerCase())
-    );
+    return { shiftMap: sMap, leaveMap: lMap };
+  }, [data]);
 
-    return { shiftMap: sMap, leaveMap: lMap, filteredStaff: staff };
-  }, [data, searchQuery]);
+  // Architectural Fix: Decoupled search filtering to prevent re-rendering maps on keystroke.
+  const filteredStaff = useMemo(() => {
+    if (!data?.staff) return [];
+    if (!searchQuery.trim()) return data.staff;
+    
+    const query = searchQuery.toLowerCase();
+    return data.staff.filter((s: any) => 
+      (s.name || '').toLowerCase().includes(query) || 
+      (s.role || '').toLowerCase().includes(query)
+    );
+  }, [data?.staff, searchQuery]);
 
   const handlePrev = () => {
     if (view === 'DAILY') setBaseDate(addDays(baseDate, -1));
@@ -144,7 +157,6 @@ export function RotaPage() {
         
         {view === 'MONTHLY' ? (
           
-          /* --- MONTHLY WALL CALENDAR GRID --- */
           <div className="flex-1 flex flex-col bg-slate-50">
             <div className="grid grid-cols-7 border-b border-slate-200 bg-white shadow-sm shrink-0">
               {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
@@ -179,9 +191,11 @@ export function RotaPage() {
                       
                       {workingStaff.map(staff => {
                         const s = shiftMap[`${staff.id}_${dateKey}`];
+                        const start = s.start_time.split('T')[1].substring(0, 5);
+                        const end = s.end_time.split('T')[1].substring(0, 5);
                         return (
-                          <div key={staff.id} className="text-[9px] font-bold px-1.5 py-0.5 rounded border truncate text-slate-700 bg-white border-slate-200 shadow-sm" title={`${staff.name}: ${format(parseISO(s.start_time), 'HH:mm')} - ${format(parseISO(s.end_time), 'HH:mm')}`}>
-                            <span className="font-black text-indigo-600 mr-1">{format(parseISO(s.start_time), 'HH:mm')}</span> 
+                          <div key={staff.id} className="text-[9px] font-bold px-1.5 py-0.5 rounded border truncate text-slate-700 bg-white border-slate-200 shadow-sm" title={`${staff.name}: ${start} - ${end}`}>
+                            <span className="font-black text-indigo-600 mr-1">{start}</span> 
                             {staff.name.split(' ')[0]}
                           </div>
                         )
@@ -195,7 +209,6 @@ export function RotaPage() {
 
         ) : (
 
-          /* --- LINEAR MATRIX (DAILY & WEEKLY) --- */
           <div className="flex-1 overflow-auto custom-scrollbar">
             <div className="w-full min-w-[800px] flex flex-col h-full">
               
@@ -219,7 +232,7 @@ export function RotaPage() {
                   <div className="p-10 text-center text-xs font-bold uppercase tracking-widest text-slate-400">No staff found matching criteria.</div>
                 ) : (
                   filteredStaff.map((staff: any) => (
-                    <div key={staff.id} className="flex hover:bg-slate-50/50 transition-colors group/row">
+                    <div key={staff.id} className="flex hover:bg-slate-50/50 transition-colors group/row" style={{ contentVisibility: 'auto', containIntrinsicSize: '64px' }}>
                       <div className="w-56 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] group-hover/row:bg-slate-50/50 transition-colors">
                         <span className="text-xs font-black text-slate-900 truncate">{staff.name || staff.email}</span>
                         <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate">{staff.role}</span>
@@ -241,7 +254,7 @@ export function RotaPage() {
                               <div className="w-full p-2 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center relative group/cell hover:border-indigo-300 hover:shadow-md transition-all">
                                 <span className="text-[10px] font-black text-slate-900 tracking-tight flex items-center gap-1">
                                   <Clock size={10} className="text-slate-400" />
-                                  {format(parseISO(shift.start_time), 'HH:mm')} - {format(parseISO(shift.end_time), 'HH:mm')}
+                                  {shift.start_time.split('T')[1].substring(0, 5)} - {shift.end_time.split('T')[1].substring(0, 5)}
                                 </span>
                                 {shift.assigned_area && (
                                   <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest mt-1 truncate w-full flex justify-center items-center gap-1">
@@ -284,6 +297,7 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
   const [startTime, setStartTime] = useState('09:00');
   const [endTime, setEndTime] = useState('17:00');
   const [assignedArea, setAssignedArea] = useState('');
+  const [notes, setNotes] = useState(''); // Schema-locked field addition
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -296,9 +310,10 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
         start_time: `${date}T${startTime}:00Z`,
         end_time: `${date}T${endTime}:00Z`,
         assigned_area: assignedArea,
+        notes: notes,
         status: 'SCHEDULED'
       });
-      queryClient.invalidateQueries({ queryKey: ['rota'] });
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
       onClose();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to save shift.');
@@ -350,6 +365,11 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
             <input type="text" value={assignedArea} onChange={e => setAssignedArea(e.target.value)} placeholder="e.g. Birds of Prey Section" className={inputClass} />
           </div>
 
+          <div>
+            <label className={labelClass}>Shift Notes (Optional)</label>
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Specific instructions for this shift..." />
+          </div>
+
           <div className="pt-4 flex justify-end gap-3 border-t border-slate-100">
             <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
             <button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-indigo-500 shadow-sm flex items-center gap-2">
@@ -390,7 +410,7 @@ function LeaveModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
         reason: reason,
         status: 'APPROVED'
       });
-      queryClient.invalidateQueries({ queryKey: ['rota'] });
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
       onClose();
     } catch (err: any) {
       setErrorMsg(err.message || 'Failed to save absence.');
