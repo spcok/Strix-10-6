@@ -8,7 +8,7 @@ interface UserProfile {
   id: string;
   name: string | null;
   initials: string | null;
-  pin: string | null;
+  pin: string | null; // Retained for future database compatibility
   role: string | null;
 }
 
@@ -16,30 +16,28 @@ interface AuthContextType {
   session: Session | null;
   user: User | null;
   profile: UserProfile | null;
-  isLocked: boolean;
-  unlock: (pin: string) => boolean;
-  lock: () => void;
   logout: () => Promise<void>;
   isLoading: boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes strict timeout
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
-  const [isLocked, setIsLocked] = useState(false);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
 
   // Architectural Fix: Safely reference timeouts and states without triggering re-renders
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
-  const isLockedRef = useRef(isLocked);
+  const throttleRef = useRef<number>(0);
 
-  // Keep the ref strictly synced with state so our stable callbacks can read it
-  useEffect(() => {
-    isLockedRef.current = isLocked;
-  }, [isLocked]);
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
+    await del('strix-auth-session');
+    setSession(null);
+    setUser(null);
+  }, []);
 
   useEffect(() => {
     const initializeAuth = async () => {
@@ -57,8 +55,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
         setSession(activeSession);
         setUser(activeSession?.user ?? null);
-        
-        if (activeSession) setIsLocked(true); 
       } catch (error) {
         console.error('[Auth Engine] Initialization failed:', error);
       } finally {
@@ -74,7 +70,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       
       if (newSession) {
         set('strix-auth-session', newSession);
-        if (event === 'SIGNED_IN') setIsLocked(false);
       } else {
         del('strix-auth-session');
       }
@@ -99,16 +94,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       return data as UserProfile;
     },
     enabled: !!user?.id,
-    // Note: Persister is now handled globally in main.tsx, but leaving this is safe.
     meta: { persist: true }, 
   });
 
   // Architectural Fix: This callback now has NO dependencies. It will never force a re-render.
   const resetIdleTimer = useCallback(() => {
-    if (isLockedRef.current) return;
+    if (!session) return; // Do not track idle time if not logged in
+    
+    const now = Date.now();
+    // Throttle: Only process input if 5 seconds have passed since last interaction
+    if (now - throttleRef.current < 5000) return; 
+    
+    throttleRef.current = now;
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
-    idleTimerRef.current = setTimeout(() => setIsLocked(true), IDLE_TIMEOUT_MS);
-  }, []);
+    
+    idleTimerRef.current = setTimeout(() => {
+      logout();
+    }, IDLE_TIMEOUT_MS);
+  }, [session, logout]);
 
   // Architectural Fix: Event listeners mount EXACTLY ONCE. No more DOM thrashing.
   useEffect(() => {
@@ -123,26 +126,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
   }, [resetIdleTimer]);
 
-  const unlock = useCallback((enteredPin: string): boolean => {
-    if (!profile?.pin) return false;
-    if (enteredPin === String(profile.pin)) {
-      setIsLocked(false);
-      resetIdleTimer();
-      return true;
-    }
-    return false;
-  }, [profile?.pin, resetIdleTimer]);
-
-  const lock = useCallback(() => setIsLocked(true), []);
-
-  const logout = useCallback(async () => {
-    await supabase.auth.signOut();
-    await del('strix-auth-session');
-    setSession(null);
-    setUser(null);
-    setIsLocked(false); 
-  }, []);
-
   const isFullyLoading = isSessionLoading || (!!user && profileStatus === 'pending');
 
   // Architectural Fix: Memoize the context value so the app only re-renders when data actually changes
@@ -150,12 +133,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     session,
     user,
     profile: profile || null,
-    isLocked,
-    unlock,
-    lock,
     logout,
     isLoading: isFullyLoading
-  }), [session, user, profile, isLocked, unlock, lock, logout, isFullyLoading]);
+  }), [session, user, profile, logout, isFullyLoading]);
 
   return (
     <AuthContext.Provider value={contextValue}>

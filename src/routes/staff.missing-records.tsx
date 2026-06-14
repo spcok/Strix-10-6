@@ -10,16 +10,12 @@ export const Route = createFileRoute('/staff/missing-records')({
   component: MissingRecordsPage,
 });
 
-// Hardcoded operational categories
-const SECTIONS = ['owl', 'raptor', 'mammal'];
-
 export function MissingRecordsPage() {
-  const [baseDate, setBaseDate] = useState(new Date());
+  const SECTIONS = useMemo(() => auditService.getValidSections(), []);
   
-  // Synchronous default state (Bypasses the TanStack useQuery hang)
+  const [baseDate, setBaseDate] = useState(new Date());
   const [selectedSection, setSelectedSection] = useState<string>(SECTIONS[0]);
 
-  // Calculate strict 7-day window
   const weekStart = startOfWeek(baseDate, { weekStartsOn: 1 });
   const weekEnd = endOfWeek(baseDate, { weekStartsOn: 1 });
   const daysInView = useMemo(() => eachDayOfInterval({ start: weekStart, end: weekEnd }), [weekStart, weekEnd]);
@@ -27,30 +23,32 @@ export function MissingRecordsPage() {
   const startStr = format(weekStart, 'yyyy-MM-dd');
   const endStr = format(weekEnd, 'yyyy-MM-dd');
 
-  // Fetch audit data based on selected section
-  const { data, isLoading } = useQuery({
-    queryKey: ['audit_records', startStr, endStr, selectedSection],
-    queryFn: () => auditService.getAuditData(startStr, endStr, selectedSection),
-    staleTime: 1000 * 60 * 5,
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ['audit_records', startStr, endStr],
+    queryFn: () => auditService.getAuditData(startStr, endStr),
+    staleTime: 1000 * 60 * 5, 
   });
 
-  // O(1) Dictionary for Logs
   const logMap = useMemo(() => {
-    if (!data) return {};
+    if (!data?.logs) return {};
     const map: Record<string, any> = {};
     data.logs.forEach((log: any) => {
-      const dateKey = log.log_date.split('T')[0]; 
+      if (!log.log_date) return;
+      const dateKey = String(log.log_date).substring(0, 10); 
       map[`${log.animal_id}_${dateKey}`] = log;
     });
     return map;
   }, [data]);
 
-  // TanStack Virtual Configuration
-  const parentRef = useRef<HTMLDivElement>(null);
-  const animals = data?.animals || [];
+  // Instant memory filter using exact database fields
+  const filteredAnimals = useMemo(() => {
+    if (!data?.animals) return [];
+    return data.animals.filter((a: any) => a.section === selectedSection);
+  }, [data?.animals, selectedSection]);
 
+  const parentRef = useRef<HTMLDivElement>(null);
   const rowVirtualizer = useVirtualizer({
-    count: animals.length,
+    count: filteredAnimals.length,
     getScrollElement: () => parentRef.current,
     estimateSize: () => 72,
     overscan: 5,
@@ -62,27 +60,25 @@ export function MissingRecordsPage() {
   return (
     <div className="max-w-[1600px] mx-auto space-y-6 pb-20 font-sans">
       
-      {/* Header & Controls */}
       <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-black uppercase tracking-tight flex items-center gap-3">
-            <ClipboardList className="text-indigo-600" /> Missing Records Audit
+            <ClipboardList className="text-indigo-600" /> Missing Records
           </h1>
-          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Husbandry & Clinical Logging</p>
+          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Compliance Audit Matrix</p>
         </div>
         
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3">
           <div className="flex items-center bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-             <button onClick={handlePrev} className="p-2 hover:bg-slate-50 border-r border-slate-200 text-slate-600"><ChevronLeft size={16}/></button>
+             <button onClick={handlePrev} className="p-2.5 hover:bg-slate-50 border-r border-slate-200 text-slate-600 transition-colors"><ChevronLeft size={16}/></button>
              <span className="px-4 text-[11px] font-black uppercase tracking-widest text-slate-700 w-44 text-center">
                 W/C {format(weekStart, 'dd MMM yyyy')}
              </span>
-             <button onClick={handleNext} className="p-2 hover:bg-slate-50 border-l border-slate-200 text-slate-600"><ChevronRight size={16}/></button>
+             <button onClick={handleNext} className="p-2.5 hover:bg-slate-50 border-l border-slate-200 text-slate-600 transition-colors"><ChevronRight size={16}/></button>
           </div>
         </div>
       </div>
 
-      {/* Synchronous Section Controls */}
       <div className="flex flex-wrap items-center gap-2">
         <div className="flex items-center gap-2 px-3 py-2 bg-slate-100 rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200">
           <Layers size={14} /> Filter Section:
@@ -91,7 +87,7 @@ export function MissingRecordsPage() {
           <button
             key={section}
             onClick={() => setSelectedSection(section)}
-            className={`px-4 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm border ${
+            className={`px-6 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm border ${
               selectedSection === section 
                 ? 'bg-indigo-600 border-indigo-600 text-white' 
                 : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50'
@@ -102,7 +98,6 @@ export function MissingRecordsPage() {
         ))}
       </div>
 
-      {/* Grid Header & Key */}
       <div className="flex justify-end gap-6 px-2">
         <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
            <div className="w-3 h-3 rounded bg-emerald-500"></div> Logged / N/A
@@ -112,11 +107,18 @@ export function MissingRecordsPage() {
         </div>
       </div>
 
-      {/* Virtualized Matrix */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-16rem)] min-h-[500px] relative">
-        {isLoading && (
-          <div className="absolute inset-0 z-40 flex items-center justify-center bg-white/60 backdrop-blur-sm">
-            <Loader2 className="animate-spin text-indigo-600" size={32} />
+        
+        {isLoading && !isError && (
+          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-white/60 backdrop-blur-sm">
+            <Loader2 className="animate-spin text-indigo-600 mb-3" size={32} />
+          </div>
+        )}
+
+        {isError && (
+          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-white/95 backdrop-blur-sm p-6 text-center">
+             <AlertTriangle size={32} className="text-rose-500 mb-2" />
+             <p className="text-xs font-bold text-slate-500">Database fetch failed. Verify network connection.</p>
           </div>
         )}
 
@@ -135,7 +137,6 @@ export function MissingRecordsPage() {
           })}
         </div>
 
-        {/* Scrollable Virtual Container */}
         <div ref={parentRef} className="flex-1 overflow-auto custom-scrollbar">
           <div
             style={{
@@ -144,13 +145,13 @@ export function MissingRecordsPage() {
               position: 'relative',
             }}
           >
-            {animals.length === 0 && !isLoading ? (
-               <div className="p-10 text-center text-xs font-bold uppercase tracking-widest text-slate-400 flex items-center justify-center gap-2">
-                 <AlertTriangle size={16} /> No animals found in {selectedSection}.
+            {filteredAnimals.length === 0 && !isLoading && !isError ? (
+               <div className="p-10 text-center text-xs font-bold uppercase tracking-widest text-slate-400 flex flex-col items-center justify-center gap-3 mt-10">
+                 No animals located for section: {selectedSection}.
                </div>
             ) : (
               rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const animal = animals[virtualRow.index];
+                const animal = filteredAnimals[virtualRow.index];
                 
                 return (
                   <div
@@ -165,20 +166,17 @@ export function MissingRecordsPage() {
                     }}
                     className="flex border-b border-slate-100 hover:bg-slate-50 transition-colors"
                   >
-                    {/* Animal Identity Column */}
                     <div className="w-64 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)]">
                       <span className="text-xs font-black text-slate-900 truncate">{animal.name}</span>
                       <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate">{animal.species}</span>
                     </div>
 
-                    {/* 7-Day Pillbox Columns */}
                     {daysInView.map((date, i) => {
                       const dateKey = format(date, 'yyyy-MM-dd');
                       const log = logMap[`${animal.id}_${dateKey}`];
                       
-                      // Shared Business Logic
                       const hasLog = !!log;
-                      const weightValid = hasLog && (log.weight > 0 || log.weight_not_required === true);
+                      const weightValid = hasLog && (Number(log.weight) > 0 || log.weight_not_required === true);
                       const feedValid = hasLog && log.fed === true;
 
                       return (
