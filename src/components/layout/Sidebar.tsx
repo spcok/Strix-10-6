@@ -53,7 +53,6 @@ const navGroups = [
       { name: 'Timesheets', to: '/staff/timesheets', icon: Clock },
       { name: 'Rota', to: '/staff/rota', icon: CalendarDays },
       { name: 'Holidays & Absence', to: '/staff/leave', icon: CalendarHeart },
-      { name: 'ZLA Compliance', to: '/staff/zla', icon: FileBadge },
       { name: 'Missing Records', to: '/staff/missing-records', icon: FileWarning },
       { name: 'Staff Shifts', to: '/staff/shifts', icon: Wrench },
     ]
