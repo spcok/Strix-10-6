@@ -349,3 +349,19 @@ export interface IsolationLog {
   created_at?: string;
   updated_at?: string;
 }
+
+export interface OrganizationProfile {
+  id: string;
+  org_name: string;
+  logo_url?: string | null;
+  contact_email?: string | null;
+  contact_phone?: string | null;
+  address?: string | null;
+  license_number?: string | null;
+  website?: string | null;
+  adoptionurl?: string | null;
+  is_deleted?: boolean;
+  created_at?: string;
+  updated_at?: string;
+  _modified?: string;
+}
