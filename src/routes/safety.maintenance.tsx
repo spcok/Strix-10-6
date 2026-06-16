@@ -1,40 +1,83 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { Wrench, Plus, X, Search, Save, Loader2, AlertCircle, HardHat, Calendar } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { supabase } from '../lib/supabase';
 import { maintenanceService } from '../services/maintenanceService';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const ticketsOptions = queryOptions({
+  queryKey: ['maintenance_tickets'],
+  queryFn: () => maintenanceService.getTickets(),
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const staffOptions = queryOptions({
+  queryKey: ['staff_members'],
+  queryFn: () => maintenanceService.getStaffMembers(),
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching Loaders)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/safety/maintenance')({
   loader: async ({ context: { queryClient } }) => {
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['maintenance_tickets'],
-        queryFn: () => maintenanceService.getTickets()
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['staff_members'],
-        queryFn: () => maintenanceService.getStaffMembers()
-      })
-    ]);
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(ticketsOptions),
+        queryClient.ensureQueryData(staffOptions)
+      ]);
+    }
   },
   component: MaintenanceTicketsPage,
 });
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function MaintenanceTicketsPage() {
+  const queryClient = useQueryClient();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const scrollParentRef = useRef<HTMLDivElement>(null);
 
-  const { data: tickets = [], isLoading } = useQuery({
-    queryKey: ['maintenance_tickets'],
-    queryFn: () => maintenanceService.getTickets(),
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('maintenance-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'maintenance_tickets' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['maintenance_tickets'] });
+        }
+      )
+      .subscribe();
 
-  const { data: staffMembers = [] } = useQuery({
-    queryKey: ['staff_members'],
-    queryFn: () => maintenanceService.getStaffMembers(),
-  });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  const { data: tickets = [], isLoading } = useQuery(ticketsOptions);
+  const { data: staffMembers = [] } = useQuery(staffOptions);
 
   const filteredTickets = useMemo(() => {
     if (!searchQuery) return tickets;
@@ -51,6 +94,19 @@ export function MaintenanceTicketsPage() {
     const staff = staffMembers.find((s: any) => s.id === id);
     return staff ? (staff.name || staff.email) : 'Unknown';
   };
+
+  // ------------------------------------------------------------------
+  // 4. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredTickets.length,
+    estimateSize: () => 80, // Estimated pixel height of a ticket row
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-32">
@@ -106,54 +162,59 @@ export function MaintenanceTicketsPage() {
               {filteredTickets.length === 0 && !isLoading ? (
                 <tr><td colSpan={6} className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No matching tickets found.</td></tr>
               ) : (
-                filteredTickets.map((ticket: any) => {
-                  const dateObj = new Date(ticket.created_at);
-                  const dueDateObj = ticket.due_date ? new Date(ticket.due_date) : null;
-                  
-                  return (
-                    <tr key={ticket.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="px-6 py-4 text-xs font-bold text-slate-500 whitespace-nowrap">
-                         {dateObj.toLocaleDateString('en-GB')} {dateObj.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                      </td>
-                      <td className="px-6 py-4">
-                        <p className="text-xs font-black text-slate-900">{ticket.title}</p>
-                        <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">{ticket.location}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        {dueDateObj ? (
-                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[9px] font-black text-slate-600 uppercase tracking-widest shadow-sm">
-                            <Calendar size={10} /> {dueDateObj.toLocaleDateString('en-GB')}
+                <>
+                  {paddingTop > 0 && <tr><td colSpan={6} style={{ height: `${paddingTop}px` }} /></tr>}
+                  {virtualItems.map((virtualRow) => {
+                    const ticket = filteredTickets[virtualRow.index];
+                    const dateObj = new Date(ticket.created_at);
+                    const dueDateObj = ticket.due_date ? new Date(ticket.due_date) : null;
+                    
+                    return (
+                      <tr key={ticket.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="px-6 py-4 text-xs font-bold text-slate-500 whitespace-nowrap">
+                           {dateObj.toLocaleDateString('en-GB')} {dateObj.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                        </td>
+                        <td className="px-6 py-4">
+                          <p className="text-xs font-black text-slate-900">{ticket.title}</p>
+                          <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest mt-0.5">{ticket.location}</p>
+                        </td>
+                        <td className="px-6 py-4">
+                          {dueDateObj ? (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[9px] font-black text-slate-600 uppercase tracking-widest shadow-sm">
+                              <Calendar size={10} /> {dueDateObj.toLocaleDateString('en-GB')}
+                            </span>
+                          ) : (
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">No Target</span>
+                          )}
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-widest border shadow-sm ${
+                            ticket.priority === 'CRITICAL' ? 'text-rose-700 bg-rose-50 border-rose-200' :
+                            ticket.priority === 'HIGH' ? 'text-orange-700 bg-orange-50 border-orange-200' :
+                            ticket.priority === 'MEDIUM' ? 'text-amber-700 bg-amber-50 border-amber-200' :
+                            'text-emerald-700 bg-emerald-50 border-emerald-200'
+                          }`}>
+                            {ticket.priority}
                           </span>
-                        ) : (
-                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">No Target</span>
-                        )}
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`inline-flex items-center gap-1 text-[9px] font-black px-2 py-0.5 rounded uppercase tracking-widest border shadow-sm ${
-                          ticket.priority === 'CRITICAL' ? 'text-rose-700 bg-rose-50 border-rose-200' :
-                          ticket.priority === 'HIGH' ? 'text-orange-700 bg-orange-50 border-orange-200' :
-                          ticket.priority === 'MEDIUM' ? 'text-amber-700 bg-amber-50 border-amber-200' :
-                          'text-emerald-700 bg-emerald-50 border-emerald-200'
-                        }`}>
-                          {ticket.priority}
-                        </span>
-                      </td>
-                      <td className="px-6 py-4 text-xs font-bold text-slate-600">
-                        {getStaffName(ticket.assigned_to)}
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`text-[10px] font-black uppercase tracking-widest ${
-                          ticket.status === 'RESOLVED' ? 'text-emerald-600' : 
-                          ticket.status === 'IN_PROGRESS' ? 'text-blue-600' :
-                          ticket.status === 'WAITING_ON_PARTS' ? 'text-amber-600' :
-                          'text-slate-500'
-                        }`}>
-                          {ticket.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
+                        </td>
+                        <td className="px-6 py-4 text-xs font-bold text-slate-600">
+                          {getStaffName(ticket.assigned_to)}
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`text-[10px] font-black uppercase tracking-widest ${
+                            ticket.status === 'RESOLVED' ? 'text-emerald-600' : 
+                            ticket.status === 'IN_PROGRESS' ? 'text-blue-600' :
+                            ticket.status === 'WAITING_ON_PARTS' ? 'text-amber-600' :
+                            'text-slate-500'
+                          }`}>
+                            {ticket.status.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {paddingBottom > 0 && <tr><td colSpan={6} style={{ height: `${paddingBottom}px` }} /></tr>}
+                </>
               )}
             </tbody>
           </table>
@@ -166,7 +227,7 @@ export function MaintenanceTicketsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// NEW TICKET MODAL COMPONENT
+// NEW TICKET MODAL COMPONENT (Unchanged - already built on React 19 Form action)
 // ---------------------------------------------------------------------------
 function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staffMembers: any[] }) {
   const queryClient = useQueryClient();
@@ -199,7 +260,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
          location: value.location,
          category: value.category,
          priority: value.priority,
-         due_date: value.due_date ? new Date(value.due_date).toISOString() : null, // Mapped correctly to schema
+         due_date: value.due_date ? new Date(value.due_date).toISOString() : null,
          assigned_to: value.assigned_to || null,
          description: value.description,
          status: value.status
@@ -229,7 +290,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div className="md:col-span-2">
                   <label className={labelClass}>Issue Title</label>
-                  <input type="text" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Broken hinge on Aviary Gate 3" className={inputClass} />
+                  <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Broken hinge on Aviary Gate 3" className={inputClass} />
                 </div>
               )}
             </form.Field>
@@ -238,7 +299,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div>
                   <label className={labelClass}>Location / Enclosure</label>
-                  <input type="text" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Penguin Pool" className={inputClass} />
+                  <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Penguin Pool" className={inputClass} />
                 </div>
               )}
             </form.Field>
@@ -247,7 +308,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div>
                   <label className={labelClass}>Target Due Date (Optional)</label>
-                  <input type="date" value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                  <input type="date" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                 </div>
               )}
             </form.Field>
@@ -256,7 +317,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div>
                   <label className={labelClass}>Category</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
                     <option value="ENCLOSURE REPAIR">Enclosure Repair</option>
                     <option value="PLUMBING">Plumbing & Water Systems</option>
                     <option value="ELECTRICAL">Electrical & Heating</option>
@@ -272,7 +333,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div>
                   <label className={`${labelClass} flex items-center gap-1.5`}><AlertCircle size={14} className="text-amber-500" /> Priority Level</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
                     <option value="LOW">LOW (Cosmetic / Non-Urgent)</option>
                     <option value="MEDIUM">MEDIUM (Standard Repair)</option>
                     <option value="HIGH">HIGH (Affects Operations)</option>
@@ -288,7 +349,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
                   <label className={`${labelClass} text-blue-700 flex items-center gap-1.5`}><HardHat size={14} /> Assign Technician</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                     <option value="">-- Unassigned (Open Queue) --</option>
                     {staffMembers.map((staff: any) => (
                       <option key={staff.id} value={staff.id}>{staff.name || staff.email}</option>
@@ -302,7 +363,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
               {(field) => (
                 <div>
                   <label className={labelClass}>Current Status</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                     <option value="OPEN">OPEN - New Ticket</option>
                     <option value="IN_PROGRESS">IN PROGRESS - Working</option>
                     <option value="WAITING_ON_PARTS">WAITING ON PARTS</option>
@@ -317,7 +378,7 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
             {(field) => (
               <div className="pt-2">
                 <label className={labelClass}>Full Description of Required Work</label>
-                <textarea required value={field.state.value} onChange={e => field.handleChange(e.target.value)} rows={4} className={`${inputClass} resize-none`} placeholder="Provide precise details of the malfunction or repair required..." />
+                <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={4} className={`${inputClass} resize-none`} placeholder="Provide precise details of the malfunction or repair required..." />
               </div>
             )}
           </form.Field>

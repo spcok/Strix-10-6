@@ -1,229 +1,341 @@
-import React, { useState, useMemo, useRef } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
-import { useVirtualizer } from '@tanstack/react-virtual';
-import { ClipboardList, Loader2, ChevronLeft, ChevronRight, AlertTriangle, Layers, RefreshCw, WifiOff, Stethoscope, Biohazard } from 'lucide-react';
-import { format, addDays, startOfWeek, endOfWeek, eachDayOfInterval, isSameDay } from 'date-fns';
-import { auditService } from '../services/auditService';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useForm } from '@tanstack/react-form';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
+import { AlertOctagon, Search, Loader2, Clock, CheckCircle2, XCircle, UserCircle, Calendar } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
+import { supabase } from '../lib/supabase';
+import { useAuth } from '../lib/auth';
+
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const missingRecordsOptions = queryOptions({
+  queryKey: ['missing_timesheets'],
+  queryFn: async () => {
+    // Queries timesheets that are marked as having an anomaly or missing punch
+    const { data, error } = await supabase
+      .from('timesheets')
+      .select('*, users:user_id(name, email, role)')
+      .eq('status', 'MISSING_RECORD')
+      .order('shift_date', { ascending: false });
+      
+    if (error) throw error;
+    return data;
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
 
 export const Route = createFileRoute('/staff/missing-records')({
+  loader: async ({ context: { queryClient } }) => {
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await queryClient.ensureQueryData(missingRecordsOptions);
+    }
+  },
   component: MissingRecordsPage,
 });
 
+// ------------------------------------------------------------------
+// 2. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function MissingRecordsPage() {
-  const CATEGORIES = useMemo(() => auditService.getValidSections(), []);
+  const queryClient = useQueryClient();
+  const { profile } = useAuth();
+  const isManager = profile?.role === 'ADMIN' || profile?.role === 'MANAGER' || profile?.role === 'HR';
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   
-  const [baseDate, setBaseDate] = useState(new Date());
-  const [selectedCategory, setSelectedCategory] = useState<string>(CATEGORIES[0]);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [resolveModalState, setResolveModalState] = useState<{
+    isOpen: boolean;
+    record: any | null;
+  }>({ isOpen: false, record: null });
 
-  const weekStart = startOfWeek(baseDate, { weekStartsOn: 1 });
-  const weekEnd = endOfWeek(baseDate, { weekStartsOn: 1 });
-  const daysInView = useMemo(() => eachDayOfInterval({ start: weekStart, end: weekEnd }), [weekStart, weekEnd]);
-  
-  const startStr = format(weekStart, 'yyyy-MM-dd');
-  const endStr = format(weekEnd, 'yyyy-MM-dd');
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('missing-records-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'timesheets' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] });
+        }
+      )
+      .subscribe();
 
-  const { data, isLoading, isError, error, refetch, isRefetching } = useQuery({
-    queryKey: ['audit_records', startStr, endStr],
-    queryFn: () => auditService.getAuditData(startStr, endStr),
-    staleTime: 1000 * 60 * 5, 
-    gcTime: 1000 * 60 * 60 * 24 * 14, 
-    networkMode: 'offlineFirst', 
-    meta: { persist: true } 
-  });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
 
-  const logMap = useMemo(() => {
-    if (!data?.logs) return {};
-    const map: Record<string, any> = {};
-    data.logs.forEach((log: any) => {
-      if (!log.log_date) return;
-      const localDate = new Date(log.log_date);
-      const dateKey = format(localDate, 'yyyy-MM-dd'); 
-      map[`${log.animal_id}_${dateKey}`] = log;
-    });
-    return map;
-  }, [data]);
+  const { data: records = [], isLoading } = useQuery(missingRecordsOptions);
 
-  const filteredAnimals = useMemo(() => {
-    if (!data?.animals) return [];
-    return data.animals.filter((a: any) => a.category === selectedCategory);
-  }, [data?.animals, selectedCategory]);
+  const filteredRecords = useMemo(() => {
+    if (!searchQuery) return records;
+    const lower = searchQuery.toLowerCase();
+    return records.filter((r: any) => 
+      (r.users?.name || '').toLowerCase().includes(lower) ||
+      (r.anomaly_reason || '').toLowerCase().includes(lower)
+    );
+  }, [records, searchQuery]);
 
-  const parentRef = useRef<HTMLDivElement>(null);
-  const rowVirtualizer = useVirtualizer({
-    count: filteredAnimals.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 72,
+  // ------------------------------------------------------------------
+  // 3. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredRecords.length,
+    estimateSize: () => 80, // Estimated pixel height of a missing record row
     overscan: 5,
   });
 
-  const handlePrev = () => setBaseDate(addDays(baseDate, -7));
-  const handleNext = () => setBaseDate(addDays(baseDate, 7));
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
-    <div className="max-w-[1600px] mx-auto space-y-6 pb-20 font-sans">
+    <div className="max-w-7xl mx-auto space-y-6 pb-20">
       
-      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      {/* Header & Navigation */}
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-black uppercase tracking-tight flex items-center gap-3">
-            <ClipboardList className="text-indigo-600" /> Missing Records
+            <AlertOctagon className="text-rose-600" /> Anomalies & Missing Records
           </h1>
-          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Compliance Audit Matrix</p>
+          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Timesheet Discrepancy Auditing</p>
         </div>
         
-        <div className="flex items-center gap-3">
-          <button 
-            onClick={() => refetch()} 
-            disabled={isLoading || isRefetching}
-            className="p-2.5 text-slate-400 hover:text-indigo-600 bg-slate-50 hover:bg-indigo-50 rounded-xl transition-colors border border-slate-200 disabled:opacity-50"
-            title="Force Sync"
-          >
-            {isRefetching ? <Loader2 size={16} className="animate-spin text-indigo-600" /> : <RefreshCw size={16} />}
-          </button>
-          <div className="flex items-center bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden">
-             <button onClick={handlePrev} className="p-2.5 hover:bg-slate-50 border-r border-slate-200 text-slate-600 transition-colors"><ChevronLeft size={16}/></button>
-             <span className="px-4 text-[11px] font-black uppercase tracking-widest text-slate-700 w-44 text-center">
-                W/C {format(weekStart, 'dd MMM yyyy')}
-             </span>
-             <button onClick={handleNext} className="p-2.5 hover:bg-slate-50 border-l border-slate-200 text-slate-600 transition-colors"><ChevronRight size={16}/></button>
+        <div className="flex flex-col sm:flex-row items-center gap-4 w-full md:w-auto">
+          <div className="relative w-full sm:w-72">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+            <input 
+              type="text" 
+              placeholder="Search staff or anomaly type..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500/50 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm" 
+            />
           </div>
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex items-center gap-2 px-3 py-2 bg-slate-100 rounded-lg text-[10px] font-black uppercase tracking-widest text-slate-500 border border-slate-200">
-          <Layers size={14} /> Filter Category:
-        </div>
-        {CATEGORIES.map(category => (
-          <button
-            key={category}
-            onClick={() => setSelectedCategory(category)}
-            className={`px-6 py-2 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm border ${
-              selectedCategory === category 
-                ? 'bg-indigo-600 border-indigo-600 text-white' 
-                : 'bg-white border-slate-200 text-slate-500 hover:text-slate-900 hover:bg-slate-50'
-            }`}
-          >
-            {category}
-          </button>
-        ))}
-      </div>
+      {/* Ledger */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-[500px]">
+        <div className="overflow-x-auto w-full flex-1">
+          <table className="w-full text-left">
+            <thead className="bg-slate-50 border-b border-slate-200">
+              <tr>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Shift Date</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Staff Member</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/3">Anomaly Details</th>
+                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right">HR Resolution</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {isLoading ? (
+                <tr><td colSpan={4} className="p-10 text-center"><Loader2 className="animate-spin text-rose-600 mx-auto" /></td></tr>
+              ) : filteredRecords.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="p-16 text-center text-xs font-black text-slate-400 uppercase tracking-widest flex flex-col items-center gap-3">
+                    <CheckCircle2 size={32} className="text-emerald-500/50" />
+                    All timesheets are reconciled. No anomalies found.
+                  </td>
+                </tr>
+              ) : (
+                <>
+                  {paddingTop > 0 && <tr><td colSpan={4} style={{ height: `${paddingTop}px` }} /></tr>}
+                  {virtualItems.map((virtualRow) => {
+                    const record = filteredRecords[virtualRow.index];
+                    const sDate = record.shift_date ? parseISO(record.shift_date) : null;
+                    
+                    return (
+                      <tr key={record.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-rose-50/30 transition-colors">
+                        <td className="px-6 py-4">
+                          {sDate ? (
+                            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-slate-100 border border-slate-200 text-[10px] font-black text-slate-700 uppercase tracking-widest">
+                              <Calendar size={12} className="text-rose-600" /> {format(sDate, 'dd MMM yyyy')}
+                            </span>
+                          ) : (
+                            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Unknown Date</span>
+                          )}
+                        </td>
+                        
+                        <td className="px-6 py-4">
+                          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
+                            <UserCircle size={14} className="text-slate-400" /> {record.users?.name || 'Unknown'}
+                          </p>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-0.5 pl-5">{record.users?.role}</p>
+                        </td>
 
-      <div className="flex justify-end gap-6 px-2">
-        <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
-           <div className="w-3 h-3 rounded bg-emerald-500"></div> Logged / N/A
-        </div>
-        <div className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500">
-           <div className="w-3 h-3 rounded bg-rose-500"></div> Missing
-        </div>
-      </div>
-
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-16rem)] min-h-[500px] relative">
-        
-        {isLoading && !data && (
-          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-white/60 backdrop-blur-sm">
-            <Loader2 className="animate-spin text-indigo-600 mb-3" size={32} />
-          </div>
-        )}
-
-        {isError && !data && (
-          <div className="absolute inset-0 z-40 flex flex-col items-center justify-center bg-white/95 backdrop-blur-sm p-6 text-center">
-             <WifiOff size={32} className="text-rose-500 mb-2" />
-             <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest mb-1">Offline & No Cache</h3>
-             <p className="text-xs font-bold text-slate-500 max-w-lg mb-4">
-               {error instanceof Error ? error.message : JSON.stringify(error)}
-             </p>
-             <button onClick={() => refetch()} className="px-5 py-2 bg-slate-900 text-white text-[10px] font-black uppercase tracking-widest rounded-lg flex items-center gap-2">
-               <RefreshCw size={14} /> Retry Sync
-             </button>
-          </div>
-        )}
-
-        <div className="flex sticky top-0 z-30 bg-slate-50 border-b border-slate-200 shadow-sm shrink-0">
-          <div className="w-64 shrink-0 p-4 border-r border-slate-200 shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] flex items-center">
-            <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Animal</span>
-          </div>
-          {daysInView.map((d, i) => {
-            const isToday = isSameDay(d, new Date());
-            return (
-              <div key={i} className={`flex-1 p-3 flex flex-col items-center justify-center border-r border-slate-200 ${isToday ? 'bg-indigo-50/50' : ''}`}>
-                <span className={`text-[9px] font-black uppercase tracking-widest ${isToday ? 'text-indigo-600' : 'text-slate-400'}`}>{format(d, 'EEE')}</span>
-                <span className={`text-sm font-black tracking-tight ${isToday ? 'text-indigo-700' : 'text-slate-900'}`}>{format(d, 'dd MMM')}</span>
-              </div>
-            );
-          })}
-        </div>
-
-        <div ref={parentRef} className="flex-1 overflow-auto custom-scrollbar">
-          <div
-            style={{
-              height: `${rowVirtualizer.getTotalSize()}px`,
-              width: '100%',
-              position: 'relative',
-            }}
-          >
-            {filteredAnimals.length === 0 && !isLoading ? (
-               <div className="p-10 text-center text-xs font-bold uppercase tracking-widest text-slate-400 flex flex-col items-center justify-center gap-3 mt-10">
-                 No active animals mapped to category: {selectedCategory}.
-               </div>
-            ) : (
-              rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                const animal = filteredAnimals[virtualRow.index];
-                
-                return (
-                  <div
-                    key={virtualRow.key}
-                    style={{
-                      position: 'absolute',
-                      top: 0,
-                      left: 0,
-                      width: '100%',
-                      height: `${virtualRow.size}px`,
-                      transform: `translateY(${virtualRow.start}px)`,
-                    }}
-                    className="flex border-b border-slate-100 hover:bg-slate-50 transition-colors"
-                  >
-                    <div className="w-64 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)]">
-                      {/* Biosecurity Flags Injected Here */}
-                      <div className="flex items-center gap-1.5 truncate">
-                        <span className="text-xs font-black text-slate-900 truncate">{animal.name}</span>
-                        {animal.biosecurityStatus === 'quarantine' && (
-                          <Biohazard size={14} className="text-rose-600 drop-shadow-sm shrink-0" title="Quarantine (Infectious)" />
-                        )}
-                        {animal.biosecurityStatus === 'isolation' && (
-                          <Stethoscope size={14} className="text-amber-500 drop-shadow-sm shrink-0" title="Medical Isolation" />
-                        )}
-                      </div>
-                      <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate mt-0.5">{animal.species}</span>
-                    </div>
-
-                    {daysInView.map((date, i) => {
-                      const dateKey = format(date, 'yyyy-MM-dd');
-                      const log = logMap[`${animal.id}_${dateKey}`];
-                      
-                      const hasLog = !!log;
-                      const weightValid = hasLog && (Number(log.weight_grams) > 0 || log.weight_not_required === true);
-                      const feedValid = hasLog && (!!log.feed_details && String(log.feed_details).trim() !== '');
-
-                      return (
-                        <div key={i} className="flex-1 p-2 border-r border-slate-100 flex items-center justify-center">
-                          <div className="w-full max-w-[80px] h-8 flex rounded-lg overflow-hidden shadow-sm border border-slate-200 bg-slate-100" title={`W: Weight | F: Feed\nDate: ${dateKey}`}>
-                            <div className={`w-1/2 flex items-center justify-center border-r border-white/20 transition-colors ${weightValid ? 'bg-emerald-500' : 'bg-rose-500'}`}>
-                              <span className="text-[10px] font-black text-white/90">W</span>
-                            </div>
-                            <div className={`w-1/2 flex items-center justify-center transition-colors ${feedValid ? 'bg-emerald-500' : 'bg-rose-500'}`}>
-                              <span className="text-[10px] font-black text-white/90">F</span>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1">
+                            <span className="text-xs font-black text-rose-700">{record.anomaly_reason || 'Missing Clock-Out / Unmatched Punch'}</span>
+                            <div className="flex items-center gap-3 text-[9px] font-bold text-slate-500 uppercase tracking-widest">
+                              <span>In: {record.clock_in_time ? format(parseISO(record.clock_in_time), 'HH:mm') : '--:--'}</span>
+                              <span>Out: {record.clock_out_time ? format(parseISO(record.clock_out_time), 'HH:mm') : '--:--'}</span>
                             </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
-                );
-              })
-            )}
-          </div>
+                        </td>
+
+                        <td className="px-6 py-4 text-right">
+                          {isManager ? (
+                            <button 
+                              onClick={() => setResolveModalState({ isOpen: true, record })}
+                              className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm" 
+                            >
+                              Resolve
+                            </button>
+                          ) : (
+                            <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">HR Action Required</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {paddingBottom > 0 && <tr><td colSpan={4} style={{ height: `${paddingBottom}px` }} /></tr>}
+                </>
+              )}
+            </tbody>
+          </table>
         </div>
+      </div>
+
+      {resolveModalState.isOpen && resolveModalState.record && (
+        <ResolutionModal 
+          onClose={() => setResolveModalState({ isOpen: false, record: null })} 
+          record={resolveModalState.record} 
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// MODAL: HR RESOLUTION (TANSTACK FORM ARCHITECTURE)
+// ============================================================================
+function ResolutionModal({ onClose, record }: { onClose: () => void, record: any }) {
+  const queryClient = useQueryClient();
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const resolveMutation = useMutation({
+    mutationFn: async (payload: any) => {
+      const { data, error } = await supabase
+        .from('timesheets')
+        .update({
+          clock_in_time: payload.clock_in_time,
+          clock_out_time: payload.clock_out_time,
+          status: 'COMPLETED', // Clears the anomaly
+          hr_resolution_notes: payload.notes
+        })
+        .eq('id', record.id);
+        
+      if (error) throw error;
+      return data;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] });
+      onClose();
+    },
+    onError: (err: any) => setErrorMsg(err.message || 'Failed to resolve record.')
+  });
+
+  // Extract date portion if available
+  const baseDate = record.shift_date || new Date().toISOString().split('T')[0];
+  
+  const getInitialTime = (timeStr: string | null) => {
+    if (!timeStr) return '';
+    try { return format(parseISO(timeStr), 'HH:mm'); } catch { return ''; }
+  };
+
+  const form = useForm({
+    defaultValues: {
+      clock_in: getInitialTime(record.clock_in_time),
+      clock_out: getInitialTime(record.clock_out_time),
+      notes: ''
+    },
+    onSubmit: async ({ value }) => {
+      setErrorMsg(null);
+      
+      if (!value.clock_in || !value.clock_out) {
+        setErrorMsg('Both Clock In and Clock Out times are required for resolution.');
+        return;
+      }
+
+      await resolveMutation.mutateAsync({
+        clock_in_time: `${baseDate}T${value.clock_in}:00Z`,
+        clock_out_time: `${baseDate}T${value.clock_out}:00Z`,
+        notes: value.notes
+      });
+    }
+  });
+
+  const inputClass = "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-900 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm";
+  const labelClass = "text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 block";
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <div className="bg-white rounded-2xl w-full max-w-md shadow-2xl overflow-hidden flex flex-col">
+        <div className="bg-slate-50 p-5 border-b border-slate-100 flex justify-between items-center">
+          <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2"><Clock size={16} className="text-rose-600"/> Resolve Discrepancy</h2>
+          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-900 rounded-lg"><XCircle size={16}/></button>
+        </div>
+        
+        <div className="p-5 bg-rose-50/50 border-b border-slate-100">
+          <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Staff Member</p>
+          <p className="text-sm font-bold text-slate-900">{record.users?.name}</p>
+          <p className="text-[10px] font-bold text-rose-700 mt-1 uppercase">{record.anomaly_reason}</p>
+        </div>
+
+        <form onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="p-6 space-y-5">
+          {errorMsg && <div className="p-3 bg-rose-50 text-rose-700 text-xs font-bold rounded-xl border border-rose-200">{errorMsg}</div>}
+
+          <div className="grid grid-cols-2 gap-4">
+            <form.Field name="clock_in">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Confirmed Clock In</label>
+                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
+            <form.Field name="clock_out">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Confirmed Clock Out</label>
+                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
+          </div>
+
+          <form.Field name="notes">
+            {(field) => (
+              <div>
+                <label className={labelClass}>HR Audit Notes</label>
+                <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Reason for manual override..." />
+              </div>
+            )}
+          </form.Field>
+
+          <div className="pt-4 flex justify-end gap-3 border-t border-slate-100">
+            <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
+            <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+              {([canSubmit, isSubmitting]) => (
+                <button type="submit" disabled={!canSubmit || isSubmitting as boolean || resolveMutation.isPending} className="px-6 py-2 bg-rose-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
+                  {(isSubmitting || resolveMutation.isPending) && <Loader2 size={14} className="animate-spin"/>} Commit Resolution
+                </button>
+              )}
+            </form.Subscribe>
+          </div>
+        </form>
       </div>
     </div>
   );

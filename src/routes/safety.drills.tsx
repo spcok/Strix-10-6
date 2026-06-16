@@ -1,38 +1,92 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { Siren, Plus, X, Search, Save, Loader2, Users, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { supabase } from '../lib/supabase';
 import { safetyDrillService } from '../services/safetyDrillService';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const safetyDrillsOptions = queryOptions({
+  queryKey: ['safety_drills'],
+  queryFn: () => safetyDrillService.getDrills(),
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const staffMembersOptions = queryOptions({
+  queryKey: ['staff_members'],
+  queryFn: () => safetyDrillService.getStaffMembers(),
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const activeTimesheetsOptions = queryOptions({
+  queryKey: ['active_timesheets_rollcall'],
+  queryFn: () => safetyDrillService.getActiveTimesheets(),
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/safety/drills')({
   loader: async ({ context: { queryClient } }) => {
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['safety_drills'],
-        queryFn: () => safetyDrillService.getDrills()
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['staff_members'],
-        queryFn: () => safetyDrillService.getStaffMembers()
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['active_timesheets_rollcall'],
-        queryFn: () => safetyDrillService.getActiveTimesheets()
-      })
-    ]);
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(safetyDrillsOptions),
+        queryClient.ensureQueryData(staffMembersOptions),
+        queryClient.ensureQueryData(activeTimesheetsOptions)
+      ]);
+    }
   },
   component: SafetyDrillsPage,
 });
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function SafetyDrillsPage() {
+  const queryClient = useQueryClient();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+  
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const { data: drills = [], isLoading } = useQuery({
-    queryKey: ['safety_drills'],
-    queryFn: () => safetyDrillService.getDrills(),
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('drills-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'safety_drills' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['safety_drills'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  const { data: drills = [], isLoading } = useQuery(safetyDrillsOptions);
 
   const filteredDrills = useMemo(() => {
     if (!searchQuery) return drills;
@@ -42,6 +96,19 @@ export function SafetyDrillsPage() {
       (drill.scenario_description || '').toLowerCase().includes(lower)
     );
   }, [drills, searchQuery]);
+
+  // ------------------------------------------------------------------
+  // 4. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredDrills.length,
+    estimateSize: () => 80, // Estimated pixel height of a drill record row
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-32">
@@ -96,39 +163,44 @@ export function SafetyDrillsPage() {
               {filteredDrills.length === 0 && !isLoading ? (
                 <tr><td colSpan={5} className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No protocol records found.</td></tr>
               ) : (
-                filteredDrills.map((drill: any) => {
-                  const dateObj = new Date(drill.drill_date);
-                  return (
-                    <tr key={drill.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="px-6 py-4 text-xs font-bold text-slate-600 whitespace-nowrap">
-                        {format(dateObj, 'dd MMM yyyy')} | {format(dateObj, 'HH:mm')}
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2 mb-1.5">
-                          {!drill.is_simulation && <span className="px-2 py-0.5 bg-rose-600 text-white text-[8px] font-black uppercase tracking-widest rounded shadow-sm animate-pulse">REAL EVENT</span>}
-                          {drill.is_simulation && <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 text-[8px] font-black uppercase tracking-widest rounded shadow-sm">SIMULATION</span>}
-                        </div>
-                        <p className="text-[10px] font-black text-slate-900 uppercase tracking-widest">{drill.drill_type.replace(/_/g, ' ')}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <p className="text-xs font-bold text-slate-700 line-clamp-2">{drill.scenario_description}</p>
-                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Area: {drill.areas_involved}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-2.5 py-1 border border-indigo-200 rounded-md">
-                          {Math.floor(drill.duration_seconds / 60)}m {drill.duration_seconds % 60}s
-                        </span>
-                      </td>
-                      <td className="px-6 py-4">
-                        <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-md border shadow-sm ${
-                          drill.status === 'REVIEW_REQUIRED' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'
-                        }`}>
-                          {drill.status.replace(/_/g, ' ')}
-                        </span>
-                      </td>
-                    </tr>
-                  );
-                })
+                <>
+                  {paddingTop > 0 && <tr><td colSpan={5} style={{ height: `${paddingTop}px` }} /></tr>}
+                  {virtualItems.map((virtualRow) => {
+                    const drill = filteredDrills[virtualRow.index];
+                    const dateObj = new Date(drill.drill_date);
+                    return (
+                      <tr key={drill.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="px-6 py-4 text-xs font-bold text-slate-600 whitespace-nowrap">
+                          {format(dateObj, 'dd MMM yyyy')} | {format(dateObj, 'HH:mm')}
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            {!drill.is_simulation && <span className="px-2 py-0.5 bg-rose-600 text-white text-[8px] font-black uppercase tracking-widest rounded shadow-sm animate-pulse">REAL EVENT</span>}
+                            {drill.is_simulation && <span className="px-2 py-0.5 bg-blue-50 text-blue-700 border border-blue-200 text-[8px] font-black uppercase tracking-widest rounded shadow-sm">SIMULATION</span>}
+                          </div>
+                          <p className="text-[10px] font-black text-slate-900 uppercase tracking-widest">{drill.drill_type.replace(/_/g, ' ')}</p>
+                        </td>
+                        <td className="px-6 py-4">
+                          <p className="text-xs font-bold text-slate-700 line-clamp-2">{drill.scenario_description}</p>
+                          <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1">Area: {drill.areas_involved}</p>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className="text-xs font-black text-indigo-600 bg-indigo-50 px-2.5 py-1 border border-indigo-200 rounded-md">
+                            {Math.floor(drill.duration_seconds / 60)}m {drill.duration_seconds % 60}s
+                          </span>
+                        </td>
+                        <td className="px-6 py-4">
+                          <span className={`text-[9px] font-black uppercase tracking-widest px-2 py-1 rounded-md border shadow-sm ${
+                            drill.status === 'REVIEW_REQUIRED' ? 'text-amber-700 bg-amber-50 border-amber-200' : 'text-emerald-700 bg-emerald-50 border-emerald-200'
+                          }`}>
+                            {drill.status.replace(/_/g, ' ')}
+                          </span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {paddingBottom > 0 && <tr><td colSpan={5} style={{ height: `${paddingBottom}px` }} /></tr>}
+                </>
               )}
             </tbody>
           </table>
@@ -140,6 +212,9 @@ export function SafetyDrillsPage() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// DRILL MODAL COMPONENT (Unchanged - already built on React 19 State)
+// ---------------------------------------------------------------------------
 function SafetyDrillModal({ onClose }: { onClose: () => void }) {
   const queryClient = useQueryClient();
   const [isSubmitting, setIsSubmitting] = useState(false);

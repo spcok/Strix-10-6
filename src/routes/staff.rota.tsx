@@ -1,18 +1,51 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useForm } from '@tanstack/react-form';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { Calendar as CalendarIcon, Loader2, ChevronLeft, ChevronRight, Search, Plus, Umbrella, Trash2, Clock, MapPin } from 'lucide-react';
 import { format, addDays, startOfWeek, endOfWeek, startOfMonth, endOfMonth, eachDayOfInterval, isSameDay, isSameMonth, parseISO } from 'date-fns';
 import { useAuth } from '../lib/auth';
+import { supabase } from '../lib/supabase';
 import { rotaService } from '../services/rotaService';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const getRotaOptions = (start: string, end: string) => queryOptions({
+  queryKey: ['rota_matrix', start, end],
+  queryFn: () => rotaService.getRotaData(start, end),
+  staleTime: 1000 * 60 * 15,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/staff/rota')({
+  loader: async ({ context: { queryClient } }) => {
+    const today = new Date();
+    const start = startOfWeek(today, { weekStartsOn: 1 });
+    const end = endOfWeek(today, { weekStartsOn: 1 });
+    const queryBufferStart = format(addDays(start, -14), 'yyyy-MM-dd');
+    const queryBufferEnd = format(addDays(end, 14), 'yyyy-MM-dd');
+    
+    // @ts-ignore
+    if (queryClient) await queryClient.ensureQueryData(getRotaOptions(queryBufferStart, queryBufferEnd));
+  },
   component: RotaPage,
 });
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function RotaPage() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+  
   const isManager = profile?.role === 'ADMIN' || profile?.role === 'MANAGER' || profile?.role === 'HR';
 
   const [view, setView] = useState<'DAILY' | 'WEEKLY' | 'MONTHLY'>('WEEKLY');
@@ -34,35 +67,47 @@ export function RotaPage() {
     return eachDayOfInterval({ start, end });
   }, [baseDate]);
 
-  // Architectural Fix: Fetch a wider buffer to guarantee offline failover navigability
   const queryBufferStart = format(addDays(dateRange.start, -14), 'yyyy-MM-dd');
   const queryBufferEnd = format(addDays(dateRange.end, 14), 'yyyy-MM-dd');
 
-  const { data, isLoading } = useQuery({
-    queryKey: ['rota_matrix', queryBufferStart, queryBufferEnd],
-    queryFn: () => rotaService.getRotaData(queryBufferStart, queryBufferEnd),
-    staleTime: 1000 * 60 * 15, // 15-minute strict local cache validity
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const shiftsChannel = supabase.channel('shifts-db-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'shifts' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
+      }).subscribe();
+      
+    const leaveChannel = supabase.channel('leave-db-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'leave' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
+      }).subscribe();
+
+    return () => {
+      supabase.removeChannel(shiftsChannel);
+      supabase.removeChannel(leaveChannel);
+    };
+  }, [queryClient]);
+
+  const { data, isLoading } = useQuery(getRotaOptions(queryBufferStart, queryBufferEnd));
 
   const deleteShiftMutation = useMutation({
     mutationFn: (id: string) => rotaService.deleteShift(id),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rota_matrix'] })
   });
 
-  // Architectural Fix: Decoupled map generation. Uses native string splitting for O(1) performance.
   const { shiftMap, leaveMap } = useMemo(() => {
     if (!data) return { shiftMap: {}, leaveMap: {} };
     const sMap: Record<string, any> = {};
     const lMap: Record<string, any> = {};
 
     data.shifts.forEach((s: any) => {
-      // Fast string split bypasses date-fns overhead for ISO strings
       const dateKey = s.start_time.split('T')[0];
       sMap[`${s.user_id}_${dateKey}`] = s;
     });
 
     data.leave.forEach((l: any) => {
-      // We still use date-fns here to expand date ranges, but this array is vastly smaller than shifts
       eachDayOfInterval({ start: parseISO(l.start_date), end: parseISO(l.end_date) }).forEach(d => {
         lMap[`${l.user_id}_${format(d, 'yyyy-MM-dd')}`] = l;
       });
@@ -71,7 +116,6 @@ export function RotaPage() {
     return { shiftMap: sMap, leaveMap: lMap };
   }, [data]);
 
-  // Architectural Fix: Decoupled search filtering to prevent re-rendering maps on keystroke.
   const filteredStaff = useMemo(() => {
     if (!data?.staff) return [];
     if (!searchQuery.trim()) return data.staff;
@@ -94,6 +138,20 @@ export function RotaPage() {
     if (view === 'WEEKLY') setBaseDate(addDays(baseDate, 7));
     if (view === 'MONTHLY') setBaseDate(addDays(endOfMonth(baseDate), 1));
   };
+
+  // ------------------------------------------------------------------
+  // 4. VIRTUALIZER ENGINE (DOM PROTECTION)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useVirtualizer({
+    count: filteredStaff.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 64, // Approximate min-h of staff rows
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
     <div className="max-w-[1600px] mx-auto space-y-6 pb-20 font-sans">
@@ -156,7 +214,6 @@ export function RotaPage() {
         )}
         
         {view === 'MONTHLY' ? (
-          
           <div className="flex-1 flex flex-col bg-slate-50">
             <div className="grid grid-cols-7 border-b border-slate-200 bg-white shadow-sm shrink-0">
               {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
@@ -206,11 +263,9 @@ export function RotaPage() {
               })}
             </div>
           </div>
-
         ) : (
-
-          <div className="flex-1 overflow-auto custom-scrollbar">
-            <div className="w-full min-w-[800px] flex flex-col h-full">
+          <div className="flex-1 overflow-auto custom-scrollbar" ref={scrollParentRef}>
+            <div className="w-full min-w-[800px] flex flex-col h-full relative">
               
               <div className="flex sticky top-0 z-30 bg-slate-50 border-b border-slate-200 shadow-sm">
                 <div className="w-56 shrink-0 p-4 border-r border-slate-200 sticky left-0 bg-slate-50 z-40 shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] flex items-center">
@@ -227,50 +282,57 @@ export function RotaPage() {
                 })}
               </div>
 
-              <div className="divide-y divide-slate-100 flex-1">
+              <div className="divide-y divide-slate-100 flex-1 relative">
                 {filteredStaff.length === 0 && !isLoading ? (
                   <div className="p-10 text-center text-xs font-bold uppercase tracking-widest text-slate-400">No staff found matching criteria.</div>
                 ) : (
-                  filteredStaff.map((staff: any) => (
-                    <div key={staff.id} className="flex hover:bg-slate-50/50 transition-colors group/row" style={{ contentVisibility: 'auto', containIntrinsicSize: '64px' }}>
-                      <div className="w-56 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] group-hover/row:bg-slate-50/50 transition-colors">
-                        <span className="text-xs font-black text-slate-900 truncate">{staff.name || staff.email}</span>
-                        <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate">{staff.role}</span>
-                      </div>
-
-                      {matrixDays.map((date, i) => {
-                        const lookupKey = `${staff.id}_${format(date, 'yyyy-MM-dd')}`;
-                        const leave = leaveMap[lookupKey];
-                        const shift = shiftMap[lookupKey];
-
-                        return (
-                          <div key={i} className="flex-1 p-1.5 border-r border-slate-100 min-h-[64px] flex items-stretch justify-center relative">
-                            {leave ? (
-                              <div className={`w-full p-2 rounded-xl border flex flex-col items-center justify-center text-center shadow-sm ${leave.leave_type === 'SICK' ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
-                                <span className="text-[9px] font-black uppercase tracking-widest">{leave.leave_type.replace(/_/g, ' ')}</span>
-                                <span className="text-[8px] font-bold mt-0.5 truncate w-full opacity-70">{leave.reason || 'Approved'}</span>
-                              </div>
-                            ) : shift ? (
-                              <div className="w-full p-2 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center relative group/cell hover:border-indigo-300 hover:shadow-md transition-all">
-                                <span className="text-[10px] font-black text-slate-900 tracking-tight flex items-center gap-1">
-                                  <Clock size={10} className="text-slate-400" />
-                                  {shift.start_time.split('T')[1].substring(0, 5)} - {shift.end_time.split('T')[1].substring(0, 5)}
-                                </span>
-                                {shift.assigned_area && (
-                                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest mt-1 truncate w-full flex justify-center items-center gap-1">
-                                    <MapPin size={8} /> {shift.assigned_area}
-                                  </span>
-                                )}
-                                {isManager && (
-                                  <button onClick={() => deleteShiftMutation.mutate(shift.id)} className="absolute -top-1.5 -right-1.5 bg-white border border-rose-200 text-rose-500 p-1 rounded-full opacity-0 group-hover/cell:opacity-100 transition-all shadow-sm hover:bg-rose-500 hover:text-white" title="Delete Shift"><Trash2 size={10} /></button>
-                                )}
-                              </div>
-                            ) : null}
+                  <>
+                    {paddingTop > 0 && <div style={{ height: paddingTop }} />}
+                    {virtualItems.map((virtualRow) => {
+                      const staff = filteredStaff[virtualRow.index];
+                      return (
+                        <div key={staff.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="flex hover:bg-slate-50/50 transition-colors group/row">
+                          <div className="w-56 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] group-hover/row:bg-slate-50/50 transition-colors">
+                            <span className="text-xs font-black text-slate-900 truncate">{staff.name || staff.email}</span>
+                            <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate">{staff.role}</span>
                           </div>
-                        );
-                      })}
-                    </div>
-                  ))
+
+                          {matrixDays.map((date, i) => {
+                            const lookupKey = `${staff.id}_${format(date, 'yyyy-MM-dd')}`;
+                            const leave = leaveMap[lookupKey];
+                            const shift = shiftMap[lookupKey];
+
+                            return (
+                              <div key={i} className="flex-1 p-1.5 border-r border-slate-100 min-h-[64px] flex items-stretch justify-center relative">
+                                {leave ? (
+                                  <div className={`w-full p-2 rounded-xl border flex flex-col items-center justify-center text-center shadow-sm ${leave.leave_type === 'SICK' ? 'bg-rose-50 border-rose-200 text-rose-700' : 'bg-amber-50 border-amber-200 text-amber-700'}`}>
+                                    <span className="text-[9px] font-black uppercase tracking-widest">{leave.leave_type.replace(/_/g, ' ')}</span>
+                                    <span className="text-[8px] font-bold mt-0.5 truncate w-full opacity-70">{leave.reason || 'Approved'}</span>
+                                  </div>
+                                ) : shift ? (
+                                  <div className="w-full p-2 rounded-xl bg-white border border-slate-200 shadow-sm flex flex-col items-center justify-center text-center relative group/cell hover:border-indigo-300 hover:shadow-md transition-all">
+                                    <span className="text-[10px] font-black text-slate-900 tracking-tight flex items-center gap-1">
+                                      <Clock size={10} className="text-slate-400" />
+                                      {shift.start_time.split('T')[1].substring(0, 5)} - {shift.end_time.split('T')[1].substring(0, 5)}
+                                    </span>
+                                    {shift.assigned_area && (
+                                      <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest mt-1 truncate w-full flex justify-center items-center gap-1">
+                                        <MapPin size={8} /> {shift.assigned_area}
+                                      </span>
+                                    )}
+                                    {isManager && (
+                                      <button onClick={() => deleteShiftMutation.mutate(shift.id)} className="absolute -top-1.5 -right-1.5 bg-white border border-rose-200 text-rose-500 p-1 rounded-full opacity-0 group-hover/cell:opacity-100 transition-all shadow-sm hover:bg-rose-500 hover:text-white" title="Delete Shift"><Trash2 size={10} /></button>
+                                    )}
+                                  </div>
+                                ) : null}
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )
+                    })}
+                    {paddingBottom > 0 && <div style={{ height: paddingBottom }} />}
+                  </>
                 )}
               </div>
             </div>
@@ -285,42 +347,42 @@ export function RotaPage() {
 }
 
 // ============================================================================
-// MODAL: ADD AD-HOC SHIFT
+// MODAL: ADD AD-HOC SHIFT (TANSTACK FORM)
 // ============================================================================
 function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
   const queryClient = useQueryClient();
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [userId, setUserId] = useState('');
-  const [date, setDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [startTime, setStartTime] = useState('09:00');
-  const [endTime, setEndTime] = useState('17:00');
-  const [assignedArea, setAssignedArea] = useState('');
-  const [notes, setNotes] = useState(''); // Schema-locked field addition
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setErrorMsg(null);
-
-    try {
-      await rotaService.saveShift({
-        user_id: userId,
-        start_time: `${date}T${startTime}:00Z`,
-        end_time: `${date}T${endTime}:00Z`,
-        assigned_area: assignedArea,
-        notes: notes,
-        status: 'SCHEDULED'
-      });
+  const saveMutation = useMutation({
+    mutationFn: async (payload: any) => rotaService.saveShift(payload),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
       onClose();
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to save shift.');
-    } finally {
-      setIsSubmitting(false);
+    },
+    onError: (err: any) => setErrorMsg(err.message || 'Failed to save shift.')
+  });
+
+  const form = useForm({
+    defaultValues: {
+      user_id: '',
+      date: format(new Date(), 'yyyy-MM-dd'),
+      start_time: '09:00',
+      end_time: '17:00',
+      assigned_area: '',
+      notes: ''
+    },
+    onSubmit: async ({ value }) => {
+      setErrorMsg(null);
+      await saveMutation.mutateAsync({
+        user_id: value.user_id,
+        start_time: `${value.date}T${value.start_time}:00Z`,
+        end_time: `${value.date}T${value.end_time}:00Z`,
+        assigned_area: value.assigned_area,
+        notes: value.notes,
+        status: 'SCHEDULED'
+      });
     }
-  };
+  });
 
   const inputClass = "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-900 focus:outline-none focus:border-indigo-500 focus:ring-2 focus:ring-indigo-500/20 transition-all shadow-sm";
   const labelClass = "text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 block";
@@ -333,48 +395,76 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-900 rounded-lg"><Trash2 size={16}/></button>
         </div>
         
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="p-6 space-y-5">
           {errorMsg && <div className="p-3 bg-rose-50 text-rose-700 text-xs font-bold rounded-xl border border-rose-200">{errorMsg}</div>}
           
-          <div>
-            <label className={labelClass}>Staff Member</label>
-            <select required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass}>
-              <option value="">Select Staff...</option>
-              {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
-            </select>
-          </div>
+          <form.Field name="user_id">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Staff Member</label>
+                <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <option value="">Select Staff...</option>
+                  {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
+                </select>
+              </div>
+            )}
+          </form.Field>
 
-          <div>
-            <label className={labelClass}>Shift Date</label>
-            <input type="date" required value={date} onChange={e => setDate(e.target.value)} className={inputClass} />
-          </div>
+          <form.Field name="date">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Shift Date</label>
+                <input type="date" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+              </div>
+            )}
+          </form.Field>
 
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass}>Start Time</label>
-              <input type="time" required value={startTime} onChange={e => setStartTime(e.target.value)} className={inputClass} />
-            </div>
-            <div>
-              <label className={labelClass}>End Time</label>
-              <input type="time" required value={endTime} onChange={e => setEndTime(e.target.value)} className={inputClass} />
-            </div>
+            <form.Field name="start_time">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Start Time</label>
+                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
+            <form.Field name="end_time">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>End Time</label>
+                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
           </div>
 
-          <div>
-            <label className={labelClass}>Assigned Area (Optional)</label>
-            <input type="text" value={assignedArea} onChange={e => setAssignedArea(e.target.value)} placeholder="e.g. Birds of Prey Section" className={inputClass} />
-          </div>
+          <form.Field name="assigned_area">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Assigned Area (Optional)</label>
+                <input type="text" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. Birds of Prey Section" className={inputClass} />
+              </div>
+            )}
+          </form.Field>
 
-          <div>
-            <label className={labelClass}>Shift Notes (Optional)</label>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Specific instructions for this shift..." />
-          </div>
+          <form.Field name="notes">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Shift Notes (Optional)</label>
+                <textarea value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Specific instructions for this shift..." />
+              </div>
+            )}
+          </form.Field>
 
           <div className="pt-4 flex justify-end gap-3 border-t border-slate-100">
             <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
-            <button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-indigo-500 shadow-sm flex items-center gap-2">
-              {isSubmitting && <Loader2 size={14} className="animate-spin"/>} Save Shift
-            </button>
+            <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+              {([canSubmit, isSubmitting]) => (
+                <button type="submit" disabled={!canSubmit || isSubmitting as boolean || saveMutation.isPending} className="px-6 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
+                  {(isSubmitting || saveMutation.isPending) && <Loader2 size={14} className="animate-spin"/>} Save Shift
+                </button>
+              )}
+            </form.Subscribe>
           </div>
         </form>
       </div>
@@ -383,41 +473,41 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
 }
 
 // ============================================================================
-// MODAL: LOG ABSENCE (SICK/LEAVE)
+// MODAL: LOG ABSENCE (TANSTACK FORM)
 // ============================================================================
 function LeaveModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
   const queryClient = useQueryClient();
-  const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const [userId, setUserId] = useState('');
-  const [startDate, setStartDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [endDate, setEndDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [leaveType, setLeaveType] = useState('ANNUAL_LEAVE');
-  const [reason, setReason] = useState('');
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setIsSubmitting(true);
-    setErrorMsg(null);
-
-    try {
-      await rotaService.saveLeave({
-        user_id: userId,
-        start_date: startDate,
-        end_date: endDate,
-        leave_type: leaveType,
-        reason: reason,
-        status: 'APPROVED'
-      });
+  const saveMutation = useMutation({
+    mutationFn: async (payload: any) => rotaService.saveLeave(payload),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
       onClose();
-    } catch (err: any) {
-      setErrorMsg(err.message || 'Failed to save absence.');
-    } finally {
-      setIsSubmitting(false);
+    },
+    onError: (err: any) => setErrorMsg(err.message || 'Failed to save absence.')
+  });
+
+  const form = useForm({
+    defaultValues: {
+      user_id: '',
+      start_date: format(new Date(), 'yyyy-MM-dd'),
+      end_date: format(new Date(), 'yyyy-MM-dd'),
+      leave_type: 'ANNUAL_LEAVE',
+      reason: ''
+    },
+    onSubmit: async ({ value }) => {
+      setErrorMsg(null);
+      await saveMutation.mutateAsync({
+        user_id: value.user_id,
+        start_date: value.start_date,
+        end_date: value.end_date,
+        leave_type: value.leave_type,
+        reason: value.reason,
+        status: 'APPROVED'
+      });
     }
-  };
+  });
 
   const inputClass = "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-900 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm";
   const labelClass = "text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 block";
@@ -430,48 +520,72 @@ function LeaveModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-900 rounded-lg"><Trash2 size={16}/></button>
         </div>
         
-        <form onSubmit={handleSubmit} className="p-6 space-y-5">
+        <form onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="p-6 space-y-5">
           {errorMsg && <div className="p-3 bg-rose-50 text-rose-700 text-xs font-bold rounded-xl border border-rose-200">{errorMsg}</div>}
           
-          <div>
-            <label className={labelClass}>Staff Member</label>
-            <select required value={userId} onChange={e => setUserId(e.target.value)} className={inputClass}>
-              <option value="">Select Staff...</option>
-              {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
-            </select>
-          </div>
+          <form.Field name="user_id">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Staff Member</label>
+                <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <option value="">Select Staff...</option>
+                  {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
+                </select>
+              </div>
+            )}
+          </form.Field>
 
           <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass}>Start Date</label>
-              <input type="date" required value={startDate} onChange={e => setStartDate(e.target.value)} className={inputClass} />
-            </div>
-            <div>
-              <label className={labelClass}>End Date</label>
-              <input type="date" required value={endDate} onChange={e => setEndDate(e.target.value)} className={inputClass} />
-            </div>
+            <form.Field name="start_date">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Start Date</label>
+                  <input type="date" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
+            <form.Field name="end_date">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>End Date</label>
+                  <input type="date" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
           </div>
 
-          <div>
-            <label className={labelClass}>Absence Type</label>
-            <select required value={leaveType} onChange={e => setLeaveType(e.target.value)} className={inputClass}>
-              <option value="ANNUAL_LEAVE">Annual Leave (Holiday)</option>
-              <option value="SICK">Sick Leave</option>
-              <option value="UNPAID">Unpaid Leave</option>
-              <option value="TRAINING">External Training</option>
-            </select>
-          </div>
+          <form.Field name="leave_type">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Absence Type</label>
+                <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <option value="ANNUAL_LEAVE">Annual Leave (Holiday)</option>
+                  <option value="SICK">Sick Leave</option>
+                  <option value="UNPAID">Unpaid Leave</option>
+                  <option value="TRAINING">External Training</option>
+                </select>
+              </div>
+            )}
+          </form.Field>
 
-          <div>
-            <label className={labelClass}>Reason / Notes</label>
-            <textarea value={reason} onChange={e => setReason(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Optional notes..." />
-          </div>
+          <form.Field name="reason">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Reason / Notes</label>
+                <textarea value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Optional notes..." />
+              </div>
+            )}
+          </form.Field>
 
           <div className="pt-4 flex justify-end gap-3 border-t border-slate-100">
             <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
-            <button type="submit" disabled={isSubmitting} className="px-6 py-2 bg-rose-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 shadow-sm flex items-center gap-2">
-              {isSubmitting && <Loader2 size={14} className="animate-spin"/>} Save Absence
-            </button>
+            <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+              {([canSubmit, isSubmitting]) => (
+                <button type="submit" disabled={!canSubmit || isSubmitting as boolean || saveMutation.isPending} className="px-6 py-2 bg-rose-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
+                  {(isSubmitting || saveMutation.isPending) && <Loader2 size={14} className="animate-spin"/>} Save Absence
+                </button>
+              )}
+            </form.Subscribe>
           </div>
         </form>
       </div>

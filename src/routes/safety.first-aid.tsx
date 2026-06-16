@@ -1,42 +1,86 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { BriefcaseMedical, Plus, X, Search, Activity, Save, Loader2, Stethoscope, UserCircle, Ambulance, AlertTriangle } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { firstAidService, StaffMember } from '../services/firstAidService';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const firstAidLogsOptions = queryOptions({
+  queryKey: ['first_aid_logs'],
+  queryFn: () => firstAidService.getFirstAidLogs(),
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const staffMembersOptions = queryOptions({
+  queryKey: ['staff_members'],
+  queryFn: () => firstAidService.getStaffMembers(),
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/safety/first-aid')({
   loader: async ({ context: { queryClient } }) => {
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['first_aid_logs'],
-        queryFn: () => firstAidService.getFirstAidLogs()
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['staff_members'],
-        queryFn: () => firstAidService.getStaffMembers()
-      })
-    ]);
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(firstAidLogsOptions),
+        queryClient.ensureQueryData(staffMembersOptions)
+      ]);
+    }
   },
   component: FirstAidPage,
 });
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function FirstAidPage() {
+  const queryClient = useQueryClient();
   const { user } = useAuth();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+  
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const { data: logs = [], isLoading } = useQuery({
-    queryKey: ['first_aid_logs'],
-    queryFn: () => firstAidService.getFirstAidLogs(),
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('first-aid-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'first_aid_logs' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['first_aid_logs'] });
+        }
+      )
+      .subscribe();
 
-  const { data: staffMembers = [] } = useQuery({
-    queryKey: ['staff_members'],
-    queryFn: () => firstAidService.getStaffMembers(),
-  });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  const { data: logs = [], isLoading } = useQuery(firstAidLogsOptions);
+  const { data: staffMembers = [] } = useQuery(staffMembersOptions);
 
   const staffMap = useMemo(() => new Map(staffMembers.map((s: StaffMember) => [s.id, s])), [staffMembers]);
 
@@ -48,6 +92,19 @@ export function FirstAidPage() {
       (log.treatment_provided || '').toLowerCase().includes(lowerQuery)
     );
   }, [logs, searchQuery]);
+
+  // ------------------------------------------------------------------
+  // 4. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredLogs.length,
+    estimateSize: () => 100, // Estimated pixel height of a clinical record row
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-32">
@@ -106,55 +163,60 @@ export function FirstAidPage() {
                   </td>
                 </tr>
               ) : (
-                filteredLogs.map((log: any) => {
-                  const dateObj = new Date(log.incident_date);
-                  const firstAider = staffMap.get(log.administered_by);
+                <>
+                  {paddingTop > 0 && <tr><td colSpan={5} style={{ height: `${paddingTop}px` }} /></tr>}
+                  {virtualItems.map((virtualRow) => {
+                    const log = filteredLogs[virtualRow.index];
+                    const dateObj = new Date(log.incident_date);
+                    const firstAider = staffMap.get(log.administered_by);
 
-                  return (
-                    <tr key={log.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-100 text-[10px] font-black text-slate-600 uppercase tracking-widest">
-                          {format(dateObj, 'dd MMM yyyy')} | {format(dateObj, 'HH:mm')}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <p className="text-xs font-black text-slate-900 uppercase tracking-tight">{log.person_involved_name}</p>
-                        <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">{log.person_type}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <p className="text-xs font-medium text-slate-600 line-clamp-2">{log.injury_description || '--'}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex flex-col gap-1">
-                          <div className="flex items-start gap-1.5 text-emerald-700">
-                            <Stethoscope size={14} className="shrink-0 mt-0.5" />
-                            <p className="text-[11px] font-bold leading-relaxed line-clamp-2">{log.treatment_provided}</p>
+                    return (
+                      <tr key={log.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50/60 transition-colors">
+                        <td className="px-6 py-4 whitespace-nowrap">
+                          <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-100 text-[10px] font-black text-slate-600 uppercase tracking-widest">
+                            {format(dateObj, 'dd MMM yyyy')} | {format(dateObj, 'HH:mm')}
                           </div>
-                          <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1 mt-1">
-                            By: {firstAider ? `${firstAider.name} (${firstAider.initials})` : 'Unknown'}
-                          </span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4 text-right">
-                        <div className="flex flex-col items-end gap-2">
-                          {log.referral_needed && (
-                            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 text-[9px] font-black text-rose-700 uppercase tracking-widest w-fit shadow-sm">
-                              <Ambulance size={12} /> External Care
+                        </td>
+                        <td className="px-6 py-4">
+                          <p className="text-xs font-black text-slate-900 uppercase tracking-tight">{log.person_involved_name}</p>
+                          <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-0.5">{log.person_type}</p>
+                        </td>
+                        <td className="px-6 py-4">
+                          <p className="text-xs font-medium text-slate-600 line-clamp-2">{log.injury_description || '--'}</p>
+                        </td>
+                        <td className="px-6 py-4">
+                          <div className="flex flex-col gap-1">
+                            <div className="flex items-start gap-1.5 text-emerald-700">
+                              <Stethoscope size={14} className="shrink-0 mt-0.5" />
+                              <p className="text-[11px] font-bold leading-relaxed line-clamp-2">{log.treatment_provided}</p>
                             </div>
-                          )}
-                          {log.incident_id && (
-                            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-200 bg-amber-50 text-[9px] font-black text-amber-700 uppercase tracking-widest w-fit shadow-sm">
-                              <AlertTriangle size={12} /> Incident Logged
-                            </div>
-                          )}
-                          {!log.referral_needed && !log.incident_id && (
-                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Isolated Event</span>
-                          )}
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
+                            <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-1 mt-1">
+                              By: {firstAider ? `${firstAider.name} (${firstAider.initials})` : 'Unknown'}
+                            </span>
+                          </div>
+                        </td>
+                        <td className="px-6 py-4 text-right">
+                          <div className="flex flex-col items-end gap-2">
+                            {log.referral_needed && (
+                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-rose-200 bg-rose-50 text-[9px] font-black text-rose-700 uppercase tracking-widest w-fit shadow-sm">
+                                <Ambulance size={12} /> External Care
+                              </div>
+                            )}
+                            {log.incident_id && (
+                              <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-amber-200 bg-amber-50 text-[9px] font-black text-amber-700 uppercase tracking-widest w-fit shadow-sm">
+                                <AlertTriangle size={12} /> Incident Logged
+                              </div>
+                            )}
+                            {!log.referral_needed && !log.incident_id && (
+                              <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Isolated Event</span>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {paddingBottom > 0 && <tr><td colSpan={5} style={{ height: `${paddingBottom}px` }} /></tr>}
+                </>
               )}
             </tbody>
           </table>
@@ -173,7 +235,7 @@ export function FirstAidPage() {
 }
 
 // ---------------------------------------------------------------------------
-// COMPOUND MODAL COMPONENT
+// COMPOUND MODAL COMPONENT (Unchanged - already built on React 19 Form action)
 // ---------------------------------------------------------------------------
 function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void, userId?: string, staffMembers: StaffMember[] }) {
   const queryClient = useQueryClient();
@@ -195,7 +257,6 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
 
   const form = useForm({
     defaultValues: {
-      // First Aid Core Fields
       incident_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
       person_involved_name: '',
       person_type: 'KEEPER',
@@ -204,8 +265,6 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
       treatment_provided: '',
       referral_needed: false,
       referral_details: '',
-      
-      // Dynamic Operational Incident Fields
       escalate_to_incident: false,
       incident_title: '',
       incident_type: 'ANIMAL_BEHAVIOR',
@@ -270,13 +329,12 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
             </div>
           )}
 
-          {/* Section 1: Patient Identity */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-50 p-5 rounded-2xl border border-slate-100 shadow-sm">
             <form.Field name="incident_date">
               {(field) => (
                 <div>
                   <label className={labelClass}>Date & Time of Treatment</label>
-                  <input type="datetime-local" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                  <input type="datetime-local" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                 </div>
               )}
             </form.Field>
@@ -285,7 +343,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
               {(field) => (
                 <div>
                   <label className={labelClass}>Patient Category</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required>
                     <option value="KEEPER">Staff / Keeper</option>
                     <option value="PUBLIC">Public / Visitor</option>
                     <option value="CONTRACTOR">Contractor</option>
@@ -299,19 +357,18 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
               {(field) => (
                 <div className="md:col-span-2">
                   <label className={labelClass}>Patient Full Name</label>
-                  <input type="text" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. John Doe" className={inputClass} />
+                  <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. John Doe" className={inputClass} />
                 </div>
               )}
             </form.Field>
           </div>
 
-          {/* Section 2: Clinical Details */}
           <div className="space-y-5">
             <form.Field name="injury_description">
               {(field) => (
                 <div>
                   <label className={labelClass}>Nature of Injury / Symptoms</label>
-                  <textarea required value={field.state.value} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none h-20`} placeholder="E.g., Laceration on left index finger, approx 2cm long..." />
+                  <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none h-20`} placeholder="E.g., Laceration on left index finger, approx 2cm long..." />
                 </div>
               )}
             </form.Field>
@@ -320,19 +377,18 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
               {(field) => (
                 <div>
                   <label className={`${labelClass} flex items-center gap-2`}><Activity size={14} className="text-emerald-600" /> Treatment Administered & Kit Usage</label>
-                  <textarea required value={field.state.value} onChange={e => field.handleChange(e.target.value)} rows={3} className={`${inputClass} resize-none h-24 bg-emerald-50/30 border-emerald-200 focus:border-emerald-500`} placeholder="E.g., Cleaned wound with sterile wipe, applied plaster. Patient rested for 10 mins..." />
+                  <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={3} className={`${inputClass} resize-none h-24 bg-emerald-50/30 border-emerald-200 focus:border-emerald-500`} placeholder="E.g., Cleaned wound with sterile wipe, applied plaster. Patient rested for 10 mins..." />
                 </div>
               )}
             </form.Field>
           </div>
 
-          {/* Section 3: Authorization & Medical Escalation */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start pt-4 border-t border-slate-100">
             <form.Field name="administered_by">
               {(field) => (
                 <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 shadow-sm">
                   <label className={`${labelClass} text-emerald-700`}><UserCircle size={14} className="inline mr-1 mb-0.5" /> Attending First Aider</label>
-                  <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} required className={inputClass}>
+                  <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} required className={inputClass}>
                     <option value="">-- Select First Aider --</option>
                     {staffMembers.map((staff: StaffMember) => (
                       <option key={staff.id} value={staff.id}>
@@ -348,7 +404,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
               <form.Field name="referral_needed">
                 {(field) => (
                   <label className="flex items-center gap-3 p-4 bg-rose-50 border border-rose-200 rounded-xl cursor-pointer hover:bg-rose-100 transition-colors shadow-sm">
-                    <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-5 h-5 rounded border-rose-300 text-rose-600 focus:ring-rose-500 bg-white" />
+                    <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-5 h-5 rounded border-rose-300 text-rose-600 focus:ring-rose-500 bg-white" />
                     <span className="text-xs font-black text-rose-800 uppercase tracking-widest flex items-center gap-2"><Ambulance size={16} /> External Medical Care Required</span>
                   </label>
                 )}
@@ -360,7 +416,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                     {(field) => (
                       <div className="animate-in fade-in slide-in-from-top-2">
                         <label className={labelClass}>Hospital / Paramedic Details</label>
-                        <input type="text" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Ambulance called at 14:30..." className={`${inputClass} border-rose-200 focus:border-rose-500 focus:ring-rose-500/20`} />
+                        <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="E.g., Ambulance called at 14:30..." className={`${inputClass} border-rose-200 focus:border-rose-500 focus:ring-rose-500/20`} />
                       </div>
                     )}
                   </form.Field>
@@ -369,12 +425,11 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
             </div>
           </div>
 
-          {/* Section 4: Dynamic Operational Incident Escalation */}
           <div className="pt-4 border-t border-slate-100">
             <form.Field name="escalate_to_incident">
               {(field) => (
                 <label className="flex items-center gap-3 p-4 bg-amber-50 border border-amber-200 rounded-xl cursor-pointer hover:bg-amber-100 transition-colors shadow-sm">
-                  <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-5 h-5 rounded border-amber-300 text-amber-600 focus:ring-amber-500 bg-white" />
+                  <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-5 h-5 rounded border-amber-300 text-amber-600 focus:ring-amber-500 bg-white" />
                   <div className="flex flex-col">
                     <span className="text-xs font-black text-amber-800 uppercase tracking-widest flex items-center gap-2">
                       <AlertTriangle size={16} /> Incident?
@@ -398,7 +453,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                       {(field) => (
                         <div className="md:col-span-2">
                           <label className={labelClass}>Incident Title</label>
-                          <input type="text" required value={field.state.value} onChange={e => field.handleChange(e.target.value)} placeholder="e.g., European Eagle Owl Strike in Aviary B" className={`${inputClass} border-amber-200 focus:border-amber-500 focus:ring-amber-500/20`} />
+                          <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g., European Eagle Owl Strike in Aviary B" className={`${inputClass} border-amber-200 focus:border-amber-500 focus:ring-amber-500/20`} />
                         </div>
                       )}
                     </form.Field>
@@ -407,7 +462,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                       {(field) => (
                         <div>
                           <label className={labelClass}>Incident Classification</label>
-                          <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} border-amber-200 focus:border-amber-500`} required>
+                          <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} border-amber-200 focus:border-amber-500`} required>
                             <option value="ANIMAL_BEHAVIOR">Animal Attack / Strike</option>
                             <option value="ESCAPE">Animal Escape</option>
                             <option value="INFRASTRUCTURE">Facility Failure / Equipment</option>
@@ -422,7 +477,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                       {(field) => (
                         <div>
                           <label className={labelClass}>Severity Matrix</label>
-                          <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} border-amber-200 focus:border-amber-500`} required>
+                          <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={`${inputClass} border-amber-200 focus:border-amber-500`} required>
                             <option value="LOW">LOW - Minor disruption</option>
                             <option value="MEDIUM">MEDIUM - Controlled breach</option>
                             <option value="HIGH">HIGH - Severe incident</option>
@@ -436,7 +491,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                       {(field) => (
                         <div className="md:col-span-2">
                           <label className={labelClass}>Operational Description</label>
-                          <textarea required value={field.state.value} onChange={e => field.handleChange(e.target.value)} rows={3} className={`${inputClass} resize-none border-amber-200 focus:border-amber-500`} placeholder="Detailed breakdown of how the operational breach occurred..." />
+                          <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={3} className={`${inputClass} resize-none border-amber-200 focus:border-amber-500`} placeholder="Detailed breakdown of how the operational breach occurred..." />
                         </div>
                       )}
                     </form.Field>
@@ -445,7 +500,7 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
                       {(field) => (
                         <div className="md:col-span-2">
                           <label className={labelClass}>Immediate Operational Actions Taken</label>
-                          <textarea required value={field.state.value} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none border-amber-200 focus:border-amber-500`} placeholder="E.g., Aviary locked down, birds isolated in holding pen, area cordoned off..." />
+                          <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none border-amber-200 focus:border-amber-500`} placeholder="E.g., Aviary locked down, birds isolated in holding pen, area cordoned off..." />
                         </div>
                       )}
                     </form.Field>
