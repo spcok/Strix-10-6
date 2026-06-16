@@ -1,16 +1,66 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, queryOptions, useQueryClient } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { 
   ClipboardList, Scale, Thermometer, Utensils, 
   ChevronLeft, ChevronRight, Plus, Edit3, Loader2, AlertCircle 
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { dailyLogService } from '../services/dailyLogService';
 import { Animal, DailyLog } from '../types';
 import DailyLogFormModal from '../components/animals/DailyLogFormModal';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const getAnimalsOptions = () => queryOptions({
+  queryKey: ['animals', 'dashboard'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('animals')
+      .select('*')
+      .order('name');
+    if (error) throw error;
+    return data as Animal[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const getDailyLogsOptions = (date: string) => queryOptions({
+  queryKey: ['daily_logs', 'date-view', date],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('daily_logs')
+      .select('*')
+      .eq('is_deleted', false)
+      .gte('log_date', `${date}T00:00:00.000Z`)
+      .lte('log_date', `${date}T23:59:59.999Z`);
+    if (error) throw error;
+    return data as DailyLog[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching Loaders)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/daily-logs')({
+  loader: async ({ context: { queryClient } }) => {
+    const today = new Date().toISOString().split('T')[0];
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await queryClient.ensureQueryData(getAnimalsOptions());
+      // @ts-ignore
+      await queryClient.ensureQueryData(getDailyLogsOptions(today));
+    }
+  },
   component: DailyLogsPage,
 });
 
@@ -23,7 +73,11 @@ const SECTION_BAR = [
   { id: 'EXOTIC', label: 'Exotic' }
 ] as const;
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function DailyLogsPage() {
+  const queryClient = useQueryClient();
   const [selectedDate, setSelectedDate] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
@@ -41,32 +95,30 @@ export function DailyLogsPage() {
     initialData: undefined,
   });
 
-  const { data: animals = [], isLoading: loadingAnimals } = useQuery({
-    queryKey: ['animals', 'dashboard'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('animals')
-        .select('*')
-        .order('name');
-      if (error) throw error;
-      return data as Animal[];
-    },
-    staleTime: Infinity,
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION (GHOST RECORD FIX)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('schema-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'daily_logs' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          // Forcefully invalidates the offline cache, triggering a background refetch
+          queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
+        }
+      )
+      .subscribe();
 
-  const { data: todaysLogs = [], isLoading: loadingLogs, error: logsError } = useQuery({
-    queryKey: ['daily_logs', 'date-view', selectedDate],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .eq('is_deleted', false)
-        .gte('log_date', `${selectedDate}T00:00:00.000Z`)
-        .lte('log_date', `${selectedDate}T23:59:59.999Z`);
-      if (error) throw error;
-      return data as DailyLog[];
-    }
-  });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
+  const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
+  const { data: todaysLogs = [], isLoading: loadingLogs, error: logsError } = useQuery(getDailyLogsOptions(selectedDate));
 
   const filteredWorksheetRecords = useMemo(() => {
     const cleanAnimals = animals.filter(a => {
@@ -122,6 +174,19 @@ export function DailyLogsPage() {
     }
     return `${grams}g`;
   };
+
+  // ------------------------------------------------------------------
+  // 4. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredWorksheetRecords.length,
+    estimateSize: () => 140, // Estimated pixel height of an average worksheet row
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -201,132 +266,142 @@ export function DailyLogsPage() {
                     </td>
                   </tr>
                 ) : (
-                  filteredWorksheetRecords.map(({ animal, log }) => {
-                    const feedDetailsParsed = typeof log?.feed_details === 'string'
-                      ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })()
-                      : log?.feed_details;
-                    const meals = feedDetailsParsed?.meals || [];
-                    const logTimeStr = log?.log_date ? new Date(log.log_date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
-                    
-                    return (
-                      <tr key={animal.id} className="hover:bg-slate-50/40 transition-colors group">
-                        
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex flex-col">
-                            <span className="font-black text-slate-900 text-sm leading-tight">{animal.name}</span>
-                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">
-                              {animal.species}
-                            </span>
-                          </div>
-                        </td>
+                  <>
+                    {paddingTop > 0 && <tr><td colSpan={5} style={{ height: `${paddingTop}px` }} /></tr>}
+                    {virtualItems.map((virtualRow) => {
+                      const { animal, log } = filteredWorksheetRecords[virtualRow.index];
+                      const feedDetailsParsed = typeof log?.feed_details === 'string'
+                        ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })()
+                        : log?.feed_details;
+                      const meals = feedDetailsParsed?.meals || [];
+                      const logTimeStr = log?.log_date ? new Date(log.log_date).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '';
+                      
+                      return (
+                        <tr 
+                          key={animal.id} 
+                          ref={rowVirtualizer.measureElement}
+                          data-index={virtualRow.index}
+                          className="hover:bg-slate-50/40 transition-colors group"
+                        >
+                          
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="flex flex-col">
+                              <span className="font-black text-slate-900 text-sm leading-tight">{animal.name}</span>
+                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">
+                                {animal.species}
+                              </span>
+                            </div>
+                          </td>
 
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => triggerLogForm(animal, 'WEIGHT', log)}
-                            className={`w-full min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${
-                              log?.weight_not_required
-                                ? 'bg-slate-100 border-slate-200 text-slate-400'
-                                : log?.weight_grams
-                                ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100 shadow-sm'
-                                : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'
-                            }`}
-                          >
-                            {log?.weight_not_required ? (
-                              <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span>
-                            ) : log?.weight_grams ? (
-                              <>
-                                <span className="text-sm font-black tracking-tight">{renderWorksheetWeight(log.weight_grams, animal.weight_unit)}</span>
-                                <span className="text-[8px] text-slate-400 font-bold mt-0.5">Logged: {logTimeStr}</span>
-                              </>
-                            ) : (
-                              <>
-                                <Scale size={14} className="opacity-40 mb-1" />
-                                <span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span>
-                              </>
-                            )}
-                          </button>
-                        </td>
-
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <button
-                            type="button"
-                            onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)}
-                            className={`w-full min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${
-                              log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c
-                                ? 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100 shadow-sm'
-                                : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 items-center'
-                            }`}
-                          >
-                            {log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? (
-                              <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight">
-                                {animal.ambient_temp_only ? (
-                                  log.temperature_c && <div className="flex justify-between text-slate-600"><span>Amb:</span><span>{log.temperature_c}°C</span></div>
-                                ) : (
-                                  <>
-                                    {log.basking_temp_c && <div className="flex justify-between text-orange-600 font-black"><span>Bask:</span><span>{log.basking_temp_c}°C</span></div>}
-                                    {log.cool_temp_c && <div className="flex justify-between text-blue-600"><span>Cool:</span><span>{log.cool_temp_c}°C</span></div>}
-                                  </>
-                                )}
-                              </div>
-                            ) : (
-                              <>
-                                <Thermometer size={14} className="opacity-40 mb-1" />
-                                <span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span>
-                              </>
-                            )}
-                          </button>
-                        </td>
-
-                        <td className="px-6 py-4">
-                          <div className="flex flex-col gap-2">
-                            {meals.length > 0 && (
-                              <div className="flex flex-col gap-1">
-                                {meals.map((meal: any, idx: number) => (
-                                  <div 
-                                    key={idx}
-                                    onClick={() => triggerLogForm(animal, 'FEEDING', log)}
-                                    className="bg-amber-50/60 border border-amber-200/70 p-2 rounded-xl text-[10px] flex flex-col gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/50 transition-colors"
-                                  >
-                                    <div className="flex justify-between font-black text-slate-800 tracking-tight">
-                                      <span>{meal.food_item || 'Diet Apportion'}</span>
-                                      <span className="text-amber-700 font-bold">
-                                        {new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                                      </span>
-                                    </div>
-                                    <div className="text-slate-500 font-bold tracking-tight">
-                                      Offered: {meal.food_offered_g}g | Consumed: <span className="text-emerald-600 font-black">{meal.food_consumed_g}g</span>
-                                    </div>
-                                    {meal.calci_dust_added && <span className="text-[8px] font-black uppercase tracking-widest text-amber-700 mt-0.5">Calci-Dust</span>}
-                                  </div>
-                                ))}
-                              </div>
-                            )}
+                          <td className="px-6 py-4 whitespace-nowrap">
                             <button
                               type="button"
-                              onClick={() => triggerLogForm(animal, 'FEEDING', log)}
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-amber-700 hover:border-amber-200 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all w-max shadow-sm"
+                              onClick={() => triggerLogForm(animal, 'WEIGHT', log)}
+                              className={`w-full min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${
+                                log?.weight_not_required
+                                  ? 'bg-slate-100 border-slate-200 text-slate-400'
+                                  : log?.weight_grams
+                                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 hover:bg-emerald-100 shadow-sm'
+                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'
+                              }`}
                             >
-                              <Plus size={10} /> Add Feeding Event
+                              {log?.weight_not_required ? (
+                                <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span>
+                              ) : log?.weight_grams ? (
+                                <>
+                                  <span className="text-sm font-black tracking-tight">{renderWorksheetWeight(log.weight_grams, animal.weight_unit)}</span>
+                                  <span className="text-[8px] text-slate-400 font-bold mt-0.5">Logged: {logTimeStr}</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Scale size={14} className="opacity-40 mb-1" />
+                                  <span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span>
+                                </>
+                              )}
                             </button>
-                          </div>
-                        </td>
+                          </td>
 
-                        <td className="px-6 py-4 max-w-xs text-slate-500 font-medium leading-relaxed">
-                          <button
-                            type="button"
-                            onClick={() => triggerLogForm(animal, 'OBSERVATION', log)}
-                            className="w-full text-left hover:bg-slate-100/50 p-2 rounded-xl transition-colors min-h-[44px] flex items-start"
-                          >
-                            <span className="text-[11px] leading-normal block">
-                              {log?.notes || <span className="text-slate-300 italic">No notes entered for this date...</span>}
-                            </span>
-                          </button>
-                        </td>
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)}
+                              className={`w-full min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${
+                                log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c
+                                  ? 'bg-blue-50 border-blue-200 text-blue-800 hover:bg-blue-100 shadow-sm'
+                                  : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 items-center'
+                              }`}
+                            >
+                              {log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? (
+                                <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight">
+                                  {animal.ambient_temp_only ? (
+                                    log.temperature_c && <div className="flex justify-between text-slate-600"><span>Amb:</span><span>{log.temperature_c}°C</span></div>
+                                  ) : (
+                                    <>
+                                      {log.basking_temp_c && <div className="flex justify-between text-orange-600 font-black"><span>Bask:</span><span>{log.basking_temp_c}°C</span></div>}
+                                      {log.cool_temp_c && <div className="flex justify-between text-blue-600"><span>Cool:</span><span>{log.cool_temp_c}°C</span></div>}
+                                    </>
+                                  )}
+                                </div>
+                              ) : (
+                                <>
+                                  <Thermometer size={14} className="opacity-40 mb-1" />
+                                  <span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span>
+                                </>
+                              )}
+                            </button>
+                          </td>
 
-                      </tr>
-                    );
-                  })
+                          <td className="px-6 py-4">
+                            <div className="flex flex-col gap-2">
+                              {meals.length > 0 && (
+                                <div className="flex flex-col gap-1">
+                                  {meals.map((meal: any, idx: number) => (
+                                    <div 
+                                      key={idx}
+                                      onClick={() => triggerLogForm(animal, 'FEEDING', log)}
+                                      className="bg-amber-50/60 border border-amber-200/70 p-2 rounded-xl text-[10px] flex flex-col gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/50 transition-colors"
+                                    >
+                                      <div className="flex justify-between font-black text-slate-800 tracking-tight">
+                                        <span>{meal.food_item || 'Diet Apportion'}</span>
+                                        <span className="text-amber-700 font-bold">
+                                          {new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
+                                        </span>
+                                      </div>
+                                      <div className="text-slate-500 font-bold tracking-tight">
+                                        Offered: {meal.food_offered_g}g | Consumed: <span className="text-emerald-600 font-black">{meal.food_consumed_g}g</span>
+                                      </div>
+                                      {meal.calci_dust_added && <span className="text-[8px] font-black uppercase tracking-widest text-amber-700 mt-0.5">Calci-Dust</span>}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => triggerLogForm(animal, 'FEEDING', log)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-amber-700 hover:border-amber-200 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all w-max shadow-sm"
+                              >
+                                <Plus size={10} /> Add Feeding Event
+                              </button>
+                            </div>
+                          </td>
+
+                          <td className="px-6 py-4 max-w-xs text-slate-500 font-medium leading-relaxed">
+                            <button
+                              type="button"
+                              onClick={() => triggerLogForm(animal, 'OBSERVATION', log)}
+                              className="w-full text-left hover:bg-slate-100/50 p-2 rounded-xl transition-colors min-h-[44px] flex items-start"
+                            >
+                              <span className="text-[11px] leading-normal block">
+                                {log?.notes || <span className="text-slate-300 italic">No notes entered for this date...</span>}
+                              </span>
+                            </button>
+                          </td>
+
+                        </tr>
+                      );
+                    })}
+                    {paddingBottom > 0 && <tr><td colSpan={5} style={{ height: `${paddingBottom}px` }} /></tr>}
+                  </>
                 )}
               </tbody>
             </table>

@@ -1,7 +1,8 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter } from 'lucide-react';
 import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
@@ -9,50 +10,80 @@ import { useAuth } from '../lib/auth';
 import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
 import { feedingService } from '../services/feedingService';
 
-// Architectural Fix: Route Loader pre-fetches all feeding dependencies
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const getAnimalsOptions = () => queryOptions({
+  queryKey: ['animals', 'dashboard'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
+    if (error) throw error;
+    return data as Animal[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const getSchedulesOptions = () => queryOptions({
+  queryKey: ['feeding_schedules'],
+  queryFn: async () => {
+    const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
+    const { data, error } = await supabase
+      .from('feeding_schedules')
+      .select('*')
+      .eq('is_deleted', false)
+      .lte('scheduled_date', maxDateStr);
+    if (error) throw error;
+    return data as FeedingScheduleType[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const getFoodOptions = () => queryOptions({
+  queryKey: ['operational_lists', 'FOOD_TYPE'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
+    if (error) throw error;
+    return data as OperationalList[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/feeding')({
   loader: async ({ context: { queryClient } }) => {
-    const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
-    
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['animals', 'dashboard'],
-        queryFn: async () => {
-          const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
-          if (error) throw error;
-          return data as Animal[];
-        }
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['feeding_schedules'],
-        queryFn: async () => {
-          const { data, error } = await supabase
-            .from('feeding_schedules')
-            .select('*')
-            .eq('is_deleted', false)
-            .lte('scheduled_date', maxDateStr);
-          if (error) throw error;
-          return data as FeedingScheduleType[];
-        }
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['operational_lists', 'FOOD_TYPE'],
-        queryFn: async () => {
-          const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
-          if (error) throw error;
-          return data as OperationalList[];
-        }
-      })
-    ]);
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(getAnimalsOptions()),
+        queryClient.ensureQueryData(getSchedulesOptions()),
+        queryClient.ensureQueryData(getFoodOptions())
+      ]);
+    }
   },
   component: FeedingSchedulePage,
 });
 
 const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function FeedingSchedulePage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   
   const [activeTab, setActiveTab] = useState<string>('EXOTIC');
   const categories = ['OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'];
@@ -60,40 +91,30 @@ export function FeedingSchedulePage() {
   const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
   const [viewLayout, setViewLayout] = useState<'individual' | 'grouped'>('individual');
 
-  const { data: animals = [], isLoading: loadingAnimals } = useQuery({ 
-    queryKey: ['animals', 'dashboard'], 
-    queryFn: async () => {
-      const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
-      if (error) throw error;
-      return data as Animal[];
-    },
-    staleTime: Infinity, 
-  });
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION (GHOST RECORD FIX)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('feeding-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'feeding_schedules' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+        }
+      )
+      .subscribe();
 
-  const { data: schedules = [], isLoading: loadingSchedules } = useQuery({ 
-    queryKey: ['feeding_schedules'], 
-    queryFn: async () => {
-      const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
-      const { data, error } = await supabase
-        .from('feeding_schedules')
-        .select('*')
-        .eq('is_deleted', false)
-        .lte('scheduled_date', maxDateStr); 
-      if (error) throw error;
-      return data as FeedingScheduleType[];
-    },
-    staleTime: 1000 * 60 * 5, 
-  });
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
 
-  const { data: foodOptions = [], isLoading: loadingFood } = useQuery({ 
-    queryKey: ['operational_lists', 'FOOD_TYPE'], 
-    queryFn: async () => {
-      const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
-      if (error) throw error;
-      return data as OperationalList[];
-    },
-    staleTime: Infinity,
-  });
+  const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
+  const { data: schedules = [], isLoading: loadingSchedules } = useQuery(getSchedulesOptions());
+  const { data: foodOptions = [], isLoading: loadingFood } = useQuery(getFoodOptions());
 
   const deleteSingleMutation = useMutation({
     mutationFn: async (scheduleId: string) => {
@@ -197,6 +218,22 @@ export function FeedingSchedulePage() {
 
   const inputClass = "w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all shadow-sm";
 
+  // ------------------------------------------------------------------
+  // 4. VIRTUALIZER ENGINE (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const activeList = viewLayout === 'individual' ? displayedSchedules : groupedSchedules;
+
+  const rowVirtualizer = useVirtualizer({
+    count: activeList.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 64, // Approximate row height
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
+
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-32">
       
@@ -232,7 +269,7 @@ export function FeedingSchedulePage() {
               <form.Field name="animal_id" children={(field) => (
                   <div>
                       <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Animal *</label>
-                      <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingAnimals} required>
+                      <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingAnimals} required>
                           <option value="">{loadingAnimals ? 'Loading animals...' : 'Select Animal...'}</option>
                           {filteredAnimals.map(a => <option key={a.id} value={a.id!}>{a.name} ({a.species})</option>)}
                       </select>
@@ -241,7 +278,7 @@ export function FeedingSchedulePage() {
 
               <form.Field name="feed_not_required" children={(field) => (
                   <div className="flex items-center gap-3 bg-rose-50 p-3 rounded-xl border border-rose-200">
-                      <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-rose-600 bg-white rounded border-rose-300 focus:ring-rose-500/50" />
+                      <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-rose-600 bg-white rounded border-rose-300 focus:ring-rose-500/50" />
                       <span className="text-xs font-bold text-rose-700 uppercase tracking-widest">Fast Day / Not Required</span>
                   </div>
               )}/>
@@ -254,26 +291,26 @@ export function FeedingSchedulePage() {
                             <div>
                                 <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Food Type *</label>
                                 {foodOptions.length > 0 ? (
-                                    <select value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingFood} required>
+                                    <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingFood} required>
                                         <option value="">{loadingFood ? 'Loading...' : 'Select...'}</option>
                                         {foodOptions.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
                                     </select>
                                 ) : (
-                                    <input value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} placeholder="E.g. Mice" required />
+                                    <input value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} placeholder="E.g. Mice" required />
                                 )}
                             </div>
                         )}/>
                         <form.Field name="quantity" children={(field) => (
                             <div>
                                 <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Quantity *</label>
-                                <input type="number" step="0.1" value={field.state.value} onChange={e => field.handleChange(parseFloat(e.target.value))} className={inputClass} required />
+                                <input type="number" step="0.1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseFloat(e.target.value))} className={inputClass} required />
                             </div>
                         )}/>
                     </div>
 
                     <form.Field name="calci_dust" children={(field) => (
                         <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                            <input type="checkbox" checked={field.state.value} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-emerald-600 bg-white rounded border-slate-300 focus:ring-emerald-500/50" />
+                            <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-emerald-600 bg-white rounded border-slate-300 focus:ring-emerald-500/50" />
                             <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Include Calci-Dust</span>
                         </div>
                     )}/>
@@ -294,7 +331,7 @@ export function FeedingSchedulePage() {
                           <form.Field name="target_date" children={(field) => (
                               <div>
                                   <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">{mode === 'interval' ? 'Start Date' : 'Target Date'} *</label>
-                                  <input type="date" value={field.state.value} onChange={e => field.handleChange(e.target.value)} className={inputClass} required/>
+                                  <input type="date" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required/>
                               </div>
                           )}/>
                           
@@ -303,13 +340,13 @@ export function FeedingSchedulePage() {
                                   <form.Field name="interval_days" children={(field) => (
                                       <div>
                                           <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Repeat Every (Days)</label>
-                                          <input type="number" min="1" value={field.state.value} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                                          <input type="number" min="1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
                                       </div>
                                   )}/>
                                   <form.Field name="occurrences" children={(field) => (
                                       <div>
                                           <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Occurrences</label>
-                                          <input type="number" min="1" max="50" value={field.state.value} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                                          <input type="number" min="1" max="50" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
                                       </div>
                                   )}/>
                               </div>
@@ -358,7 +395,7 @@ export function FeedingSchedulePage() {
                </div>
            </div>
 
-           <div className="flex-1 overflow-y-auto relative">
+           <div ref={scrollParentRef} className="flex-1 overflow-y-auto relative custom-scrollbar">
               {loadingSchedules && (
                 <div className="absolute inset-0 z-20 bg-white/50 backdrop-blur-sm flex items-center justify-center">
                     <div className="flex flex-col items-center gap-3">
@@ -377,95 +414,101 @@ export function FeedingSchedulePage() {
                       </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                      {!loadingSchedules && displayedSchedules.length === 0 ? (
+                      {!loadingSchedules && activeList.length === 0 ? (
                            <tr><td colSpan={4} className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No upcoming schedules found.</td></tr>
                       ) : (
-                          viewLayout === 'individual' ? (
-                              displayedSchedules.map(schedule => {
-                                  const animal = animals.find(a => a.id === schedule.animal_id);
-                                  const dateObj = parseISO(schedule.scheduled_date);
-                                  const isToday = schedule.scheduled_date === getLocalDateString();
-                                  const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
+                          <>
+                              {paddingTop > 0 && <tr><td colSpan={4} style={{ height: `${paddingTop}px` }} /></tr>}
+                              {virtualItems.map((virtualRow) => {
+                                  const item = activeList[virtualRow.index];
+                                  
+                                  if (viewLayout === 'individual') {
+                                      const schedule = item as FeedingScheduleType;
+                                      const animal = animals.find(a => a.id === schedule.animal_id);
+                                      const dateObj = parseISO(schedule.scheduled_date);
+                                      const isToday = schedule.scheduled_date === getLocalDateString();
+                                      const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
 
-                                  return (
-                                      <tr key={schedule.id} className="hover:bg-slate-50 transition-colors group">
-                                          <td className="px-6 py-4">
-                                              <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md border text-[10px] font-black uppercase tracking-widest ${isToday ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
-                                                  <CalIcon size={12}/> {format(dateObj, 'd MMM')}
-                                              </div>
-                                          </td>
-                                          <td className="px-6 py-4">
-                                              <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
-                                          </td>
-                                          <td className="px-6 py-4">
-                                              {isNotRequired ? (
-                                                <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
-                                              ) : (
-                                                <>
-                                                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{schedule.quantity}x {schedule.food_type}</p>
-                                                  {schedule.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {schedule.supplements}</span>}
-                                                </>
-                                              )}
-                                          </td>
-                                          <td className="px-6 py-4 text-right">
-                                              <button 
-                                                onClick={() => deleteSingleMutation.mutate(schedule.id!)}
-                                                disabled={deleteSingleMutation.isPending}
-                                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
-                                              >
-                                                  {deleteSingleMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                                              </button>
-                                          </td>
-                                      </tr>
-                                  );
-                              })
-                          ) : (
-                              groupedSchedules.map((group, idx) => {
-                                  const animal = animals.find(a => a.id === group.animal_id);
-                                  const startDateObj = parseISO(group.start_date);
-                                  const endDateObj = parseISO(group.end_date);
-
-                                  return (
-                                      <tr key={idx} className="hover:bg-slate-50 transition-colors group">
-                                          <td className="px-6 py-4">
-                                              <div className="flex flex-col gap-1">
-                                                  <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
-                                                      Start: {format(startDateObj, 'd MMM')}
+                                      return (
+                                          <tr key={schedule.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
+                                              <td className="px-6 py-4">
+                                                  <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md border text-[10px] font-black uppercase tracking-widest ${isToday ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                                                      <CalIcon size={12}/> {format(dateObj, 'd MMM')}
                                                   </div>
-                                                  {group.count > 1 && (
-                                                      <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
-                                                          End: {format(endDateObj, 'd MMM')}
-                                                      </div>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  {isNotRequired ? (
+                                                    <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
+                                                  ) : (
+                                                    <>
+                                                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{schedule.quantity}x {schedule.food_type}</p>
+                                                      {schedule.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {schedule.supplements}</span>}
+                                                    </>
                                                   )}
-                                              </div>
-                                          </td>
-                                          <td className="px-6 py-4">
-                                              <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
-                                          </td>
-                                          <td className="px-6 py-4">
-                                              {group.feed_not_required ? (
-                                                <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
-                                              ) : (
-                                                <>
-                                                  <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{group.quantity}x {group.food_type} <span className="text-slate-400">({group.count} feeds)</span></p>
-                                                  {group.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {group.supplements}</span>}
-                                                </>
-                                              )}
-                                          </td>
-                                          <td className="px-6 py-4 text-right">
-                                              <button 
-                                                onClick={() => deleteGroupMutation.mutate(group.child_ids)}
-                                                disabled={deleteGroupMutation.isPending}
-                                                className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50" 
-                                                title="Delete entire group"
-                                              >
-                                                  {deleteGroupMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
-                                              </button>
-                                          </td>
-                                      </tr>
-                                  );
-                              })
-                          )
+                                              </td>
+                                              <td className="px-6 py-4 text-right">
+                                                  <button 
+                                                    onClick={() => deleteSingleMutation.mutate(schedule.id!)}
+                                                    disabled={deleteSingleMutation.isPending}
+                                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                                                  >
+                                                      {deleteSingleMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                  </button>
+                                              </td>
+                                          </tr>
+                                      );
+                                  } else {
+                                      const group = item as any;
+                                      const animal = animals.find(a => a.id === group.animal_id);
+                                      const startDateObj = parseISO(group.start_date);
+                                      const endDateObj = parseISO(group.end_date);
+
+                                      return (
+                                          <tr key={virtualRow.index} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
+                                              <td className="px-6 py-4">
+                                                  <div className="flex flex-col gap-1">
+                                                      <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
+                                                          Start: {format(startDateObj, 'd MMM')}
+                                                      </div>
+                                                      {group.count > 1 && (
+                                                          <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
+                                                              End: {format(endDateObj, 'd MMM')}
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  {group.feed_not_required ? (
+                                                    <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
+                                                  ) : (
+                                                    <>
+                                                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{group.quantity}x {group.food_type} <span className="text-slate-400">({group.count} feeds)</span></p>
+                                                      {group.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {group.supplements}</span>}
+                                                    </>
+                                                  )}
+                                              </td>
+                                              <td className="px-6 py-4 text-right">
+                                                  <button 
+                                                    onClick={() => deleteGroupMutation.mutate(group.child_ids)}
+                                                    disabled={deleteGroupMutation.isPending}
+                                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50" 
+                                                    title="Delete entire group"
+                                                  >
+                                                      {deleteGroupMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                  </button>
+                                              </td>
+                                          </tr>
+                                      );
+                                  }
+                              })}
+                              {paddingBottom > 0 && <tr><td colSpan={4} style={{ height: `${paddingBottom}px` }} /></tr>}
+                          </>
                       )}
                   </tbody>
               </table>

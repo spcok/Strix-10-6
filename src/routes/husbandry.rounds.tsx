@@ -1,6 +1,7 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { 
   CheckCircle2, AlertCircle, Droplets, Lock, HeartPulse, 
   ChevronLeft, ChevronRight, Loader2, Edit3, X, Save
@@ -11,26 +12,47 @@ import { useAuth } from '../lib/auth';
 import { dailyRoundsService } from '../services/dailyRoundsService';
 import { Animal, DailyRound } from '../types';
 
-// Architectural Fix: Route Loader pre-fetches default rounds
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
+const getAnimalsOptions = () => queryOptions({
+  queryKey: ['animals', 'dashboard'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('animals').select('*').order('name');
+    if (error) throw error;
+    return data as Animal[];
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+const getRoundsOptions = (date: string, shift: string) => queryOptions({
+  queryKey: ['daily_rounds', date, shift],
+  queryFn: () => dailyRoundsService.getRoundsByDateAndShift(date, shift),
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching Loaders)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/rounds')({
   loader: async ({ context: { queryClient } }) => {
     const today = format(new Date(), 'yyyy-MM-dd');
     const defaultShift = 'Morning';
     
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['animals', 'dashboard'],
-        queryFn: async () => {
-          const { data, error } = await supabase.from('animals').select('*').order('name');
-          if (error) throw error;
-          return data as Animal[];
-        }
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['daily_rounds', today, defaultShift],
-        queryFn: () => dailyRoundsService.getRoundsByDateAndShift(today, defaultShift)
-      })
-    ]);
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([
+        queryClient.ensureQueryData(getAnimalsOptions()),
+        queryClient.ensureQueryData(getRoundsOptions(today, defaultShift))
+      ]);
+    }
   },
   component: DailyRoundsPage,
 });
@@ -45,9 +67,13 @@ const SECTION_BAR = [
 
 const SHIFT_OPTIONS = ['Morning', 'Afternoon'];
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function DailyRoundsPage() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   
   const [selectedDate, setSelectedDate] = useState<string>(
     format(new Date(), 'yyyy-MM-dd')
@@ -77,6 +103,27 @@ export function DailyRoundsPage() {
     currentNote: ''
   });
 
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION (GHOST RECORD FIX)
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const channel = supabase
+      .channel('rounds-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'daily_rounds' },
+        (payload) => {
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['daily_rounds'] });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [queryClient]);
+
   React.useEffect(() => {
     if (profile?.initials) {
       setInitials(profile.initials);
@@ -89,23 +136,8 @@ export function DailyRoundsPage() {
     setSubmissionStatus(null);
   }, [selectedDate, activeShift]);
 
-  const { data: animals = [], isLoading: loadingAnimals } = useQuery({
-    queryKey: ['animals', 'dashboard'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('animals')
-        .select('*')
-        .order('name');
-      if (error) throw error;
-      return data as Animal[];
-    },
-    staleTime: Infinity,
-  });
-
-  const { data: rounds = [], isLoading: loadingRounds, error: roundsError } = useQuery({
-    queryKey: ['daily_rounds', selectedDate, activeShift],
-    queryFn: () => dailyRoundsService.getRoundsByDateAndShift(selectedDate, activeShift)
-  });
+  const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
+  const { data: rounds = [], isLoading: loadingRounds, error: roundsError } = useQuery(getRoundsOptions(selectedDate, activeShift));
 
   const filteredWorksheetRecords = useMemo(() => {
     const cleanAnimals = animals.filter(a => {
@@ -207,6 +239,20 @@ export function DailyRoundsPage() {
       setIsSubmitting(false);
     }
   };
+
+  // ------------------------------------------------------------------
+  // 4. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredWorksheetRecords.length,
+    estimateSize: () => 80, // Approximate row height for welfare checks
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
+
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -319,93 +365,103 @@ export function DailyRoundsPage() {
                     </td>
                   </tr>
                 ) : (
-                  filteredWorksheetRecords.map(({ animal, round }) => {
-                    const isAlive = round?.is_alive || false;
-                    const isWater = round?.water_checked || false;
-                    const isLocked = round?.locks_secured || false;
-                    const isComplete = isAlive && isWater && isLocked;
-                    const isDraft = draftRounds[animal.id] !== undefined;
+                  <>
+                    {paddingTop > 0 && <tr><td colSpan={5} style={{ height: `${paddingTop}px` }} /></tr>}
+                    {virtualItems.map((virtualRow) => {
+                      const { animal, round } = filteredWorksheetRecords[virtualRow.index];
+                      const isAlive = round?.is_alive || false;
+                      const isWater = round?.water_checked || false;
+                      const isLocked = round?.locks_secured || false;
+                      const isComplete = isAlive && isWater && isLocked;
+                      const isDraft = draftRounds[animal.id] !== undefined;
 
-                    return (
-                      <tr key={animal.id} className={`transition-colors duration-150 group ${isComplete ? 'bg-emerald-50/30 hover:bg-emerald-100/40' : 'bg-white hover:bg-slate-100'}`}>
-                        
-                        <td className="px-6 py-4 whitespace-nowrap">
-                          <div className="flex flex-col">
-                            <span className="font-black text-slate-900 text-sm leading-tight flex items-center gap-2">
-                              {animal.name}
-                              {isComplete && <CheckCircle2 size={14} className="text-emerald-500" />}
-                              {isDraft && <span className="bg-amber-100 text-amber-800 text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-wider">Draft</span>}
-                            </span>
-                            <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">
-                              {animal.species}
-                            </span>
-                          </div>
-                        </td>
-
-                        <td className="px-4 py-4 whitespace-nowrap text-center">
-                          <button
-                            onClick={() => handleToggle(animal, round, 'is_alive')}
-                            className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
-                              isAlive 
-                                ? 'bg-emerald-600 border-emerald-700 text-white shadow-emerald-600/30 hover:bg-emerald-700' 
-                                : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-emerald-50 hover:border-emerald-400 hover:text-emerald-700'
-                            }`}
-                          >
-                            <HeartPulse size={24} className={isAlive ? 'scale-110' : 'opacity-80'} />
-                          </button>
-                        </td>
-
-                        <td className="px-4 py-4 whitespace-nowrap text-center">
-                          <button
-                            onClick={() => handleToggle(animal, round, 'water_checked')}
-                            className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
-                              isWater 
-                                ? 'bg-blue-600 border-blue-700 text-white shadow-blue-600/30 hover:bg-blue-700' 
-                                : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-blue-50 hover:border-blue-400 hover:text-blue-700'
-                            }`}
-                          >
-                            <Droplets size={24} className={isWater ? 'scale-110' : 'opacity-80'} />
-                          </button>
-                        </td>
-
-                        <td className="px-4 py-4 whitespace-nowrap text-center">
-                          <button
-                            onClick={() => handleToggle(animal, round, 'locks_secured')}
-                            className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
-                              isLocked 
-                                ? 'bg-amber-500 border-amber-600 text-white shadow-amber-500/30 hover:bg-amber-600' 
-                                : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-amber-50 hover:border-amber-400 hover:text-amber-700'
-                            }`}
-                          >
-                            <Lock size={22} className={isLocked ? 'scale-110' : 'opacity-80'} />
-                          </button>
-                        </td>
-
-                        <td className="px-6 py-4 max-w-xs text-slate-500 font-medium leading-relaxed">
-                          <button
-                            onClick={() => setNoteModalState({ isOpen: true, animal, round, currentNote: round?.animal_issue_note || '' })}
-                            className={`w-full text-left p-3 rounded-xl transition-colors min-h-[56px] flex items-start border ${
-                              round?.animal_issue_note 
-                                ? 'bg-rose-50 border-rose-200 hover:bg-rose-100' 
-                                : 'bg-slate-50/50 border-dashed border-slate-200 hover:bg-slate-100'
-                            }`}
-                          >
-                            {round?.animal_issue_note ? (
-                              <span className="text-[11px] leading-normal block font-bold text-rose-700">
-                                {round.animal_issue_note}
+                      return (
+                        <tr 
+                          key={animal.id} 
+                          ref={rowVirtualizer.measureElement}
+                          data-index={virtualRow.index}
+                          className={`transition-colors duration-150 group ${isComplete ? 'bg-emerald-50/30 hover:bg-emerald-100/40' : 'bg-white hover:bg-slate-100'}`}
+                        >
+                          
+                          <td className="px-6 py-4 whitespace-nowrap">
+                            <div className="flex flex-col">
+                              <span className="font-black text-slate-900 text-sm leading-tight flex items-center gap-2">
+                                {animal.name}
+                                {isComplete && <CheckCircle2 size={14} className="text-emerald-500" />}
+                                {isDraft && <span className="bg-amber-100 text-amber-800 text-[8px] font-black px-1.5 py-0.5 rounded uppercase tracking-wider">Draft</span>}
                               </span>
-                            ) : (
-                              <div className="flex items-center gap-2 text-slate-400">
-                                <Edit3 size={14} className="opacity-50" />
-                                <span className="text-[10px] font-black uppercase tracking-widest">Log Issue / Alert</span>
-                              </div>
-                            )}
-                          </button>
-                        </td>
+                              <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">
+                                {animal.species}
+                              </span>
+                            </div>
+                          </td>
 
-                      </tr>
-                    );
-                  })
+                          <td className="px-4 py-4 whitespace-nowrap text-center">
+                            <button
+                              onClick={() => handleToggle(animal, round, 'is_alive')}
+                              className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
+                                isAlive 
+                                  ? 'bg-emerald-600 border-emerald-700 text-white shadow-emerald-600/30 hover:bg-emerald-700' 
+                                  : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-emerald-50 hover:border-emerald-400 hover:text-emerald-700'
+                              }`}
+                            >
+                              <HeartPulse size={24} className={isAlive ? 'scale-110' : 'opacity-80'} />
+                            </button>
+                          </td>
+
+                          <td className="px-4 py-4 whitespace-nowrap text-center">
+                            <button
+                              onClick={() => handleToggle(animal, round, 'water_checked')}
+                              className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
+                                isWater 
+                                  ? 'bg-blue-600 border-blue-700 text-white shadow-blue-600/30 hover:bg-blue-700' 
+                                  : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-blue-50 hover:border-blue-400 hover:text-blue-700'
+                              }`}
+                            >
+                              <Droplets size={24} className={isWater ? 'scale-110' : 'opacity-80'} />
+                            </button>
+                          </td>
+
+                          <td className="px-4 py-4 whitespace-nowrap text-center">
+                            <button
+                              onClick={() => handleToggle(animal, round, 'locks_secured')}
+                              className={`w-14 h-14 rounded-2xl mx-auto flex items-center justify-center transition-all shadow-md border-2 ${
+                                isLocked 
+                                  ? 'bg-amber-500 border-amber-600 text-white shadow-amber-500/30 hover:bg-amber-600' 
+                                  : 'bg-slate-100 border-slate-300 text-slate-600 hover:bg-amber-50 hover:border-amber-400 hover:text-amber-700'
+                              }`}
+                            >
+                              <Lock size={22} className={isLocked ? 'scale-110' : 'opacity-80'} />
+                            </button>
+                          </td>
+
+                          <td className="px-6 py-4 max-w-xs text-slate-500 font-medium leading-relaxed">
+                            <button
+                              onClick={() => setNoteModalState({ isOpen: true, animal, round, currentNote: round?.animal_issue_note || '' })}
+                              className={`w-full text-left p-3 rounded-xl transition-colors min-h-[56px] flex items-start border ${
+                                round?.animal_issue_note 
+                                  ? 'bg-rose-50 border-rose-200 hover:bg-rose-100' 
+                                  : 'bg-slate-50/50 border-dashed border-slate-200 hover:bg-slate-100'
+                              }`}
+                            >
+                              {round?.animal_issue_note ? (
+                                <span className="text-[11px] leading-normal block font-bold text-rose-700">
+                                  {round.animal_issue_note}
+                                </span>
+                              ) : (
+                                <div className="flex items-center gap-2 text-slate-400">
+                                  <Edit3 size={14} className="opacity-50" />
+                                  <span className="text-[10px] font-black uppercase tracking-widest">Log Issue / Alert</span>
+                                </div>
+                              )}
+                            </button>
+                          </td>
+
+                        </tr>
+                      );
+                    })}
+                    {paddingBottom > 0 && <tr><td colSpan={5} style={{ height: `${paddingBottom}px` }} /></tr>}
+                  </>
                 )}
               </tbody>
             </table>

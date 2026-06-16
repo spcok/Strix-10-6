@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useState, useRef, ReactNode, useCallback, useMemo } from 'react';
 import { Session, User } from '@supabase/supabase-js';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { get, set, del } from 'idb-keyval';
 import { supabase } from './supabase';
 
@@ -8,7 +8,7 @@ interface UserProfile {
   id: string;
   name: string | null;
   initials: string | null;
-  pin: string | null; // Retained for future database compatibility
+  pin: string | null; 
   role: string | null;
 }
 
@@ -18,26 +18,50 @@ interface AuthContextType {
   profile: UserProfile | null;
   logout: () => Promise<void>;
   isLoading: boolean;
+  isLocked: boolean;
+  lockSession: () => void;
+  unlockSession: (pinCode: string) => boolean;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes strict timeout
 
 export function AuthProvider({ children }: { children: ReactNode }) {
+  const queryClient = useQueryClient();
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [isSessionLoading, setIsSessionLoading] = useState(true);
+  
+  // New Soft-Lock State
+  const [isLocked, setIsLocked] = useState(false);
 
-  // Architectural Fix: Safely reference timeouts and states without triggering re-renders
   const idleTimerRef = useRef<NodeJS.Timeout | null>(null);
   const throttleRef = useRef<number>(0);
+
+  // Persist lock state across browser refresh
+  useEffect(() => {
+    if (localStorage.getItem('strix-is-locked') === 'true') {
+      setIsLocked(true);
+    }
+  }, []);
+
+  const lockSession = useCallback(() => {
+    setIsLocked(true);
+    localStorage.setItem('strix-is-locked', 'true');
+  }, []);
 
   const logout = useCallback(async () => {
     await supabase.auth.signOut();
     await del('strix-auth-session');
+    
+    // Instantly purge all cached arrays from RAM to prevent RLS ghost states
+    queryClient.clear(); 
+    
     setSession(null);
     setUser(null);
-  }, []);
+    setIsLocked(false);
+    localStorage.removeItem('strix-is-locked');
+  }, [queryClient]);
 
   useEffect(() => {
     const initializeAuth = async () => {
@@ -65,6 +89,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     initializeAuth();
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, newSession) => {
+      if (event === 'SIGNED_IN') {
+        queryClient.invalidateQueries();
+      }
+      
+      if (event === 'SIGNED_OUT') {
+        queryClient.clear();
+      }
+
       setSession(newSession);
       setUser(newSession?.user ?? null);
       
@@ -76,7 +108,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     return () => subscription.unsubscribe();
-  }, []);
+  }, [queryClient]);
 
   const { data: profile, status: profileStatus } = useQuery({
     queryKey: ['userProfile', user?.id],
@@ -97,23 +129,32 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     meta: { persist: true }, 
   });
 
-  // Architectural Fix: This callback now has NO dependencies. It will never force a re-render.
+  const unlockSession = useCallback((pinCode: string) => {
+    // Failsafe: If no PIN is set up in the database, allow bypass for now.
+    // Otherwise, rigorously verify against local offline cache.
+    if (!profile?.pin || profile.pin === pinCode) {
+      setIsLocked(false);
+      localStorage.removeItem('strix-is-locked');
+      return true;
+    }
+    return false;
+  }, [profile]);
+
   const resetIdleTimer = useCallback(() => {
-    if (!session) return; // Do not track idle time if not logged in
+    if (!session || isLocked) return; // Do not trigger timers if already locked
     
     const now = Date.now();
-    // Throttle: Only process input if 5 seconds have passed since last interaction
     if (now - throttleRef.current < 5000) return; 
     
     throttleRef.current = now;
     if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
     
     idleTimerRef.current = setTimeout(() => {
-      logout();
+      console.log('[Auth Engine] Idle timeout reached. Locking screen.');
+      lockSession();
     }, IDLE_TIMEOUT_MS);
-  }, [session, logout]);
+  }, [session, isLocked, lockSession]);
 
-  // Architectural Fix: Event listeners mount EXACTLY ONCE. No more DOM thrashing.
   useEffect(() => {
     const events = ['mousedown', 'mousemove', 'keypress', 'scroll', 'touchstart'];
     events.forEach(event => document.addEventListener(event, resetIdleTimer, { passive: true }));
@@ -128,14 +169,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const isFullyLoading = isSessionLoading || (!!user && profileStatus === 'pending');
 
-  // Architectural Fix: Memoize the context value so the app only re-renders when data actually changes
   const contextValue = useMemo(() => ({
     session,
     user,
     profile: profile || null,
     logout,
-    isLoading: isFullyLoading
-  }), [session, user, profile, logout, isFullyLoading]);
+    isLoading: isFullyLoading,
+    isLocked,
+    lockSession,
+    unlockSession
+  }), [session, user, profile, logout, isFullyLoading, isLocked, lockSession, unlockSession]);
 
   return (
     <AuthContext.Provider value={contextValue}>

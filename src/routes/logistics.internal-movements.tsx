@@ -1,176 +1,110 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery } from '@tanstack/react-query';
-import { ArrowRightLeft, Loader2, Calendar, Filter, MapPin, FileText } from 'lucide-react';
+import { useQuery, queryOptions } from '@tanstack/react-query';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
+import { ArrowLeftRight, Search, Loader2, Calendar, MapPin, AlertCircle } from 'lucide-react';
+import { format, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
-import { Animal, InternalMovement, OperationalList } from '../types';
 
-// Architectural Fix: Route Loader pre-fetches internal logistics
+const movementsOptions = queryOptions({
+  queryKey: ['internal_movements'],
+  queryFn: async () => {
+    const { data, error } = await supabase
+      .from('internal_movements')
+      .select('*, animals (name, species)')
+      .order('movement_date', { ascending: false });
+    if (error) throw error;
+    return data;
+  },
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
 export const Route = createFileRoute('/logistics/internal-movements')({
-  loader: async ({ context: { queryClient } }) => {
-    await Promise.all([
-      queryClient.ensureQueryData({
-        queryKey: ['animals', 'dashboard'],
-        queryFn: async () => {
-          const { data, error } = await supabase.from('animals').select('*');
-          if (error) throw error;
-          return data as Animal[];
-        }
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['operational_lists', 'LOCATION'],
-        queryFn: async () => {
-          const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'LOCATION').eq('is_deleted', false);
-          if (error) throw error;
-          return data as OperationalList[];
-        }
-      }),
-      queryClient.ensureQueryData({
-        queryKey: ['internal_movements'],
-        queryFn: async () => {
-          const { data, error } = await supabase
-            .from('internal_movements')
-            .select('*')
-            .eq('is_deleted', false)
-            .order('movement_date', { ascending: false });
-          if (error) throw error;
-          return data as InternalMovement[];
-        }
-      })
-    ]);
+  loader: ({ context: { queryClient } }) => {
+    // @ts-ignore
+    if (queryClient) queryClient.ensureQueryData(movementsOptions);
   },
   component: InternalMovementsPage,
 });
 
 export function InternalMovementsPage() {
-  const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
+  const scrollParentRef = useRef<HTMLDivElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const { data: movements = [], isLoading } = useQuery(movementsOptions);
 
-  const { data: animals = [], isLoading: loadingAnimals } = useQuery({
-    queryKey: ['animals', 'dashboard'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('animals').select('*');
-      if (error) throw error;
-      return data as Animal[];
-    },
-    staleTime: Infinity
+  const filtered = useMemo(() => {
+    if (!searchQuery) return movements;
+    const q = searchQuery.toLowerCase();
+    return movements.filter(m => 
+      m.animals?.name.toLowerCase().includes(q) || 
+      m.reason?.toLowerCase().includes(q)
+    );
+  }, [movements, searchQuery]);
+
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filtered.length,
+    estimateSize: () => 80,
+    overscan: 5,
   });
 
-  const { data: locations = [] } = useQuery({
-    queryKey: ['operational_lists', 'LOCATION'],
-    queryFn: async () => {
-      const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'LOCATION').eq('is_deleted', false);
-      if (error) throw error;
-      return data as OperationalList[];
-    },
-    staleTime: Infinity
-  });
-
-  const { data: movements = [], isLoading: loadingMovements } = useQuery({
-    queryKey: ['internal_movements'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('internal_movements')
-        .select('*')
-        .eq('is_deleted', false)
-        .order('movement_date', { ascending: false });
-      if (error) throw error;
-      return data as InternalMovement[];
-    }
-  });
-
-  const locationMap = useMemo(() => new Map(locations.map(l => [l.id, l.name])), [locations]);
-  const animalMap = useMemo(() => new Map(animals.map(a => [a.id, a])), [animals]);
-
-  const displayedMovements = useMemo(() => {
-    if (filterAnimalId === 'ALL') return movements;
-    return movements.filter(m => m.animal_id === filterAnimalId);
-  }, [movements, filterAnimalId]);
-
-  const inputClass = "bg-transparent text-[10px] font-black text-slate-700 uppercase tracking-widest border-none focus:ring-0 cursor-pointer outline-none py-1 pr-2 w-48 truncate";
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-32">
-      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-        <div>
-          <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
-            <ArrowRightLeft className="text-emerald-600" size={24} /> Internal Movements
-          </h1>
-          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Enclosure Location Auditing (ZLA compliance)</p>
-        </div>
-
-        <div className="flex items-center gap-2 bg-white p-2 rounded-xl border border-slate-200 shadow-sm">
-          <Filter size={14} className="text-slate-400 ml-2" />
-          <select value={filterAnimalId} onChange={(e) => setFilterAnimalId(e.target.value)} className={inputClass}>
-            <option value="ALL">All Enclosure Assets</option>
-            {animals.map(a => <option key={a.id} value={a.id}>{a.name || 'Unnamed'} ({a.species})</option>)}
-          </select>
+    <div className="max-w-7xl mx-auto space-y-6 pb-20">
+      <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between">
+        <h1 className="text-2xl font-black text-slate-900 tracking-tight flex items-center gap-3">
+          <ArrowLeftRight className="text-indigo-600" /> Internal Movements
+        </h1>
+        <div className="relative w-64">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+          <input 
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search transfers..."
+            className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold"
+          />
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-12rem)] min-h-[500px]">
-        <div className="flex-1 overflow-y-auto relative">
-          {(loadingMovements || loadingAnimals) && (
-            <div className="absolute inset-0 bg-white/60 backdrop-blur-sm z-20 flex items-center justify-center">
-              <Loader2 className="animate-spin text-emerald-600 w-8 h-8" />
-            </div>
-          )}
-
-          <table className="w-full text-left min-w-[700px]">
-            <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
-              <tr>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/5">Timestamp</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/4">Animal Asset</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/4">Movement Sequence</th>
-                <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/3">Authorization Reason & Notes</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {displayedMovements.length === 0 && !loadingMovements ? (
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        {isLoading ? (
+          <div className="p-20 flex justify-center"><Loader2 className="animate-spin text-indigo-600" /></div>
+        ) : (
+          <div className="w-full overflow-x-auto custom-scrollbar">
+            <table className="w-full text-left border-collapse min-w-[700px]">
+              <thead className="bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-500">
                 <tr>
-                  <td colSpan={4} className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">
-                    No movement records found within this scope.
-                  </td>
+                  <th className="px-6 py-4">Date</th>
+                  <th className="px-6 py-4">Animal</th>
+                  <th className="px-6 py-4">From → To</th>
+                  <th className="px-6 py-4">Reason</th>
                 </tr>
-              ) : (
-                displayedMovements.map((move) => {
-                  const targetAnimal = animalMap.get(move.animal_id);
-                  const fromLocName = locationMap.get(move.from_location || '') || move.from_location || 'System Origin';
-                  const toLocName = locationMap.get(move.to_location) || move.to_location || 'Unknown';
-                  const dateObj = new Date(move.movement_date);
-
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {paddingTop > 0 && <tr><td colSpan={4} style={{ height: `${paddingTop}px` }} /></tr>}
+                {virtualItems.map((virtualRow) => {
+                  const m = filtered[virtualRow.index];
                   return (
-                    <tr key={move.id} className="hover:bg-slate-50/60 transition-colors">
-                      <td className="px-6 py-4 whitespace-nowrap">
-                        <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-100 text-[10px] font-black text-slate-600 uppercase tracking-widest">
-                          <Calendar size={12} /> {dateObj.toLocaleDateString('en-GB')} {dateObj.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}
-                        </div>
+                    <tr key={m.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50">
+                      <td className="px-6 py-4 text-[10px] font-black text-slate-400">{format(parseISO(m.movement_date), 'dd MMM yyyy')}</td>
+                      <td className="px-6 py-4 text-xs font-bold">{m.animals?.name}</td>
+                      <td className="px-6 py-4 text-xs font-medium flex items-center gap-2">
+                        {m.from_location || 'N/A'} <MapPin size={12}/> {m.to_location}
                       </td>
-                      <td className="px-6 py-4">
-                        <p className="text-xs font-black text-slate-900 uppercase tracking-tight">{targetAnimal?.name || 'Unknown Entity'}</p>
-                        <p className="text-[10px] font-bold text-slate-400 italic tracking-tight">{targetAnimal?.species || 'Unclassified'}</p>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="flex items-center gap-2 text-xs font-bold text-slate-700">
-                          <span className="text-slate-400 font-medium truncate max-w-[100px]" title={fromLocName}>{fromLocName}</span>
-                          <span className="text-emerald-600 font-black">→</span>
-                          <span className="text-emerald-700 font-black bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200/60 truncate max-w-[120px]" title={toLocName}>{toLocName}</span>
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <div className="space-y-0.5">
-                          <p className="text-xs font-black text-slate-800 uppercase tracking-tight flex items-center gap-1.5">
-                            <FileText size={12} className="text-slate-400" /> {move.reason || 'Unspecified Revision'}
-                          </p>
-                          {move.notes && <p className="text-[11px] font-medium text-slate-500 leading-relaxed">{move.notes}</p>}
-                        </div>
-                      </td>
+                      <td className="px-6 py-4 text-xs text-slate-600">{m.reason}</td>
                     </tr>
                   );
-                })
-              )}
-            </tbody>
-          </table>
-        </div>
+                })}
+                {paddingBottom > 0 && <tr><td colSpan={4} style={{ height: `${paddingBottom}px` }} /></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
