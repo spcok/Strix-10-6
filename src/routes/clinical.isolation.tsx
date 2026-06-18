@@ -41,9 +41,6 @@ const isolationLogsOptions = queryOptions({
   staleTime: 1000 * 60 * 5, gcTime: 1000 * 60 * 60 * 24 * 15, networkMode: 'offlineFirst', meta: { persist: true }
 });
 
-// ------------------------------------------------------------------
-// 2. ROUTE CONFIGURATION (Pre-fetching Loaders)
-// ------------------------------------------------------------------
 export const Route = createFileRoute('/clinical/isolation')({
   loader: ({ context }) => {
     // @ts-ignore
@@ -60,7 +57,7 @@ export const Route = createFileRoute('/clinical/isolation')({
 });
 
 // ------------------------------------------------------------------
-// 3. DASHBOARD COMPONENT
+// 2. DASHBOARD COMPONENT
 // ------------------------------------------------------------------
 export function BiosecurityDashboard() {
   const queryClient = useQueryClient();
@@ -71,7 +68,6 @@ export function BiosecurityDashboard() {
   const { data: staff, isLoading: loadingStaff } = useQuery(activeStaffOptions);
   const { data: logs, isLoading: loadingLogs } = useQuery(isolationLogsOptions);
 
-  // Triage logic: Split active vs historical
   const { activeThreats, historicalLogs } = useMemo(() => {
     if (!logs) return { activeThreats: [], historicalLogs: [] };
     const now = new Date();
@@ -90,19 +86,13 @@ export function BiosecurityDashboard() {
     return { activeThreats: active, historicalLogs: historical };
   }, [logs]);
 
-  // ------------------------------------------------------------------
-  // 4. VIRTUALIZER ENGINE (DOM Protection for Historical Logs)
-  // ------------------------------------------------------------------
   const rowVirtualizer = useVirtualizer({
     count: historicalLogs.length,
     getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 50, // Height of a single historical table row
+    estimateSize: () => 50,
     overscan: 10,
   });
 
-  // ------------------------------------------------------------------
-  // 5. TANSTACK FORM ENGINE (CPU Protection)
-  // ------------------------------------------------------------------
   const initiateProtocol = useMutation({
     mutationFn: async (formValues: any) => {
       if (!user?.id) throw new Error("Authentication failure: Keeper UUID not found.");
@@ -115,9 +105,8 @@ export function BiosecurityDashboard() {
         start_date: new Date(formValues.startDate).toISOString(),
         end_date: formValues.endDate ? new Date(formValues.endDate).toISOString() : null,
         is_deleted: false,
-        created_by: user.id,
-        modified_by: user.id,
-        authorized_by: formValues.authorizedBy 
+        authorized_by: formValues.authorizedBy, // Replaced created_by with authorized_by
+        modified_by: user.id
       };
 
       const { error } = await supabase.from('isolation_logs').insert([payload]);
@@ -176,7 +165,6 @@ export function BiosecurityDashboard() {
         {/* Left Column: Active Threats & Historical */}
         <div className="lg:col-span-2 space-y-6">
           
-          {/* Active Threats */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
             <div className="p-5 border-b border-slate-200 bg-slate-50 flex items-center justify-between">
               <h2 className="text-sm font-black uppercase tracking-widest flex items-center gap-2 text-slate-900">
@@ -233,7 +221,6 @@ export function BiosecurityDashboard() {
             </div>
           </div>
 
-          {/* Virtualized Historical Logs */}
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col">
             <div className="p-5 border-b border-slate-200 bg-slate-50">
               <h2 className="text-sm font-black uppercase tracking-widest flex items-center gap-2 text-slate-900">
@@ -241,7 +228,6 @@ export function BiosecurityDashboard() {
               </h2>
             </div>
             
-            {/* Header Row */}
             <div className="grid grid-cols-12 gap-4 p-3 bg-slate-50 border-b border-slate-200 text-[10px] font-black uppercase tracking-widest text-slate-500 sticky top-0 z-10">
               <div className="col-span-3">Patient</div>
               <div className="col-span-2">Type</div>
@@ -284,7 +270,6 @@ export function BiosecurityDashboard() {
           </div>
         </div>
 
-        {/* Right Column: Trigger Form (TanStack Form) */}
         <div className="lg:col-span-1">
           <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden sticky top-6">
              <div className="p-5 border-b border-slate-200 bg-slate-900 text-white">
