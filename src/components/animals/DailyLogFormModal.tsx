@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
 import { useForm, FieldApi } from '@tanstack/react-form';
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { X, Save, Loader2, AlertCircle, Plus, Trash2, Scale, Utensils, Thermometer } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, parse } from 'date-fns';
 import { dailyLogService } from '../../services/dailyLogService';
 import { Animal, DailyLog } from '../../types';
 
@@ -14,8 +14,18 @@ interface DailyLogFormModalProps {
   initialLogData?: DailyLog;
 }
 
+// Type definitions to eliminate "as any" bypasses
+interface MealInput {
+  id: string;
+  food_item: string;
+  time: string;
+  food_offered_g: string | number;
+  food_consumed_g: string | number;
+  calci_dust_added: boolean;
+}
+
 // ------------------------------------------------------------------
-// EXTRACTED COMPONENTS: Prevents DOM destruction & unmounting on keystroke
+// EXTRACTED COMPONENTS
 // ------------------------------------------------------------------
 function FormInput({ field, label, type = 'text', placeholder }: { field: FieldApi<any, any, any, any>; label: string; type?: string; placeholder?: string }) {
   return (
@@ -50,7 +60,6 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
   const queryClient = useQueryClient();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Helper to unpack legacy imperial grammar
   const unpackGramsToImperial = (grams: number | null, unit: string) => {
     if (!grams) return { lbs: '', oz: '', eighths: '0' };
     const totalOunces = grams / 28.3495;
@@ -70,13 +79,9 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
   const initialImperial = unpackGramsToImperial(initialLogData?.weight_grams || null, animal.weight_unit || 'g');
 
-  // Pre-parse the meals logic correctly for TanStack defaultValues
-  const initialMeals = () => {
+  const initialMeals = (): MealInput[] => {
     if (mode !== 'FEEDING') return [];
-    const feedDetailsParsed = typeof initialLogData?.feed_details === 'string'
-      ? (() => { try { return JSON.parse(initialLogData.feed_details); } catch { return null; } })()
-      : initialLogData?.feed_details;
-    const existing = feedDetailsParsed?.meals || [];
+    const existing = initialLogData?.feed_details?.meals || [];
     if (existing.length > 0) {
       return existing.map((m: any) => ({
         id: crypto.randomUUID(),
@@ -84,15 +89,18 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
         food_offered_g: m.food_offered_g?.toString() || '',
         food_consumed_g: m.food_consumed_g?.toString() || '',
         calci_dust_added: !!m.calci_dust_added,
-        time: m.time ? new Date(m.time).toTimeString().slice(0, 5) : new Date().toTimeString().slice(0, 5)
+        time: m.time ? format(new Date(m.time), 'HH:mm') : format(new Date(), 'HH:mm')
       }));
     }
-    return [{ id: crypto.randomUUID(), food_item: '', food_offered_g: '', food_consumed_g: '', calci_dust_added: false, time: new Date().toTimeString().slice(0, 5) }];
+    return [{ id: crypto.randomUUID(), food_item: '', food_offered_g: '', food_consumed_g: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') }];
   };
 
   const logMutation = useMutation({
     mutationFn: async (value: any) => {
-      const combinedTimestamp = new Date(`${value.log_date}T${value.log_time || '12:00'}:00`).toISOString();
+      // ENTERPRISE FIX: Use date-fns to safely parse local device time before resolving to UTC string
+      const localDate = parse(`${value.log_date} ${value.log_time || '12:00'}`, 'yyyy-MM-dd HH:mm', new Date());
+      const combinedTimestamp = localDate.toISOString();
+
       let finalWeightGrams: number | null = null;
 
       if (mode === 'WEIGHT' && !value.weight_not_required) {
@@ -109,13 +117,17 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       }
 
       if (mode === 'FEEDING') {
-        const formattedMeals = value.meals.map((m: any) => ({
-          time: new Date(`${value.log_date}T${m.time}:00`).toISOString(),
-          food_item: m.food_item,
-          food_offered_g: Number(m.food_offered_g || 0),
-          food_consumed_g: Number(m.food_consumed_g || 0),
-          calci_dust_added: m.calci_dust_added
-        }));
+        const formattedMeals = value.meals.map((m: MealInput) => {
+          // Process meal times safely via date-fns
+          const mealLocalTime = parse(`${value.log_date} ${m.time}`, 'yyyy-MM-dd HH:mm', new Date());
+          return {
+            time: mealLocalTime.toISOString(),
+            food_item: m.food_item,
+            food_offered_g: Number(m.food_offered_g || 0),
+            food_consumed_g: Number(m.food_consumed_g || 0),
+            calci_dust_added: m.calci_dust_added
+          };
+        });
 
         if (initialLogData?.id) {
           return await dailyLogService.updateLogDirect(initialLogData.id, {
@@ -135,11 +147,13 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       }
 
       const updates: any = { notes: value.notes || null, log_date: combinedTimestamp };
+      
       if (mode === 'WEIGHT') {
         updates.weight_grams = finalWeightGrams;
         updates.weight_not_required = value.weight_not_required;
         updates.weight_unit = animal.weight_unit;
       }
+      
       if (mode === 'TEMPERATURE') {
         updates.temperature_c = value.temperature_c === '' ? null : Number(value.temperature_c);
         updates.basking_temp_c = value.basking_temp_c === '' ? null : Number(value.basking_temp_c);
@@ -162,7 +176,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
   const form = useForm({
     defaultValues: {
       log_date: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
-      log_time: initialLogData?.log_date ? new Date(initialLogData.log_date).toTimeString().slice(0, 5) : new Date().toTimeString().slice(0, 5),
+      log_time: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'HH:mm') : format(new Date(), 'HH:mm'),
       notes: initialLogData?.notes || '',
       lbs: initialImperial.lbs, oz: initialImperial.oz, eighths: initialImperial.eighths,
       metric_weight: animal.weight_unit === 'kg' && initialLogData?.weight_grams ? (initialLogData.weight_grams / 1000).toString() : initialLogData?.weight_grams || '',
@@ -297,7 +311,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
                         <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Active Rations Logged</span>
                         <button
                           type="button"
-                          onClick={() => field.pushValue({ id: crypto.randomUUID(), food_item: '', food_offered_g: '', food_consumed_g: '', calci_dust_added: false, time: new Date().toTimeString().slice(0, 5) })}
+                          onClick={() => field.pushValue({ id: crypto.randomUUID(), food_item: '', food_offered_g: '', food_consumed_g: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') })}
                           className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-100 transition-colors shadow-sm"
                         >
                           <Plus size={12} /> Add Row
@@ -315,22 +329,22 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
                             
                             <div className="grid grid-cols-3 gap-2">
                               <div className="col-span-2">
-                                <form.Field name={`meals[${index}].food_item` as any}>{(subField) => <FormInput field={subField} label={`Food Item (${index + 1})`} placeholder="e.g. DOC" />}</form.Field>
+                                <form.Field name={`meals[${index}].food_item` as const}>{(subField) => <FormInput field={subField} label={`Food Item (${index + 1})`} placeholder="e.g. DOC" />}</form.Field>
                               </div>
                               <div>
-                                <form.Field name={`meals[${index}].time` as any}>{(subField) => <FormInput field={subField} label="Time" type="time" />}</form.Field>
+                                <form.Field name={`meals[${index}].time` as const}>{(subField) => <FormInput field={subField} label="Time" type="time" />}</form.Field>
                               </div>
                             </div>
 
                             <div className="grid grid-cols-2 gap-3">
-                              <form.Field name={`meals[${index}].food_offered_g` as any}>{(subField) => <FormInput field={subField} label="Offered (g)" type="number" />}</form.Field>
-                              <form.Field name={`meals[${index}].food_consumed_g` as any}>{(subField) => <FormInput field={subField} label="Consumed (g)" type="number" />}</form.Field>
+                              <form.Field name={`meals[${index}].food_offered_g` as const}>{(subField) => <FormInput field={subField} label="Offered (g)" type="number" />}</form.Field>
+                              <form.Field name={`meals[${index}].food_consumed_g` as const}>{(subField) => <FormInput field={subField} label="Consumed (g)" type="number" />}</form.Field>
                             </div>
 
-                            <form.Field name={`meals[${index}].calci_dust_added` as any}>
+                            <form.Field name={`meals[${index}].calci_dust_added` as const}>
                               {(subField) => (
                                 <label className="flex items-center gap-2 cursor-pointer pt-1">
-                                  <input type="checkbox" checked={subField.state.value} onChange={(e) => subField.handleChange(e.target.checked)} className="w-3.5 h-3.5 text-amber-600 border-slate-300 rounded focus:ring-amber-500" />
+                                  <input type="checkbox" checked={Boolean(subField.state.value)} onChange={(e) => subField.handleChange(e.target.checked)} className="w-3.5 h-3.5 text-amber-600 border-slate-300 rounded focus:ring-amber-500" />
                                   <span className="text-[10px] font-bold text-slate-600 uppercase tracking-wide">Add Calci-Dust Modifier</span>
                                 </label>
                               )}

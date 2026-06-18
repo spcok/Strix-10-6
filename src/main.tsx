@@ -1,32 +1,36 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { RouterProvider, createRouter } from '@tanstack/react-router';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query';
 import { persistQueryClient } from '@tanstack/react-query-persist-client';
 import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persister';
 import { get, set, del } from 'idb-keyval';
-import { AlertTriangle, WifiOff } from 'lucide-react';
+import { AlertTriangle } from 'lucide-react';
 import { routeTree } from './routeTree.gen';
 import './index.css';
 
-// 1. Core Engine Upgrade: Queries AND Mutations set to offline-first
+// ------------------------------------------------------------------
+// 1. CORE ENGINE UPGRADE (Strict Offline-First)
+// ------------------------------------------------------------------
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      gcTime: 1000 * 60 * 60 * 24 * 14, // 14 Days offline cache
-      staleTime: 1000 * 60 * 5, // 5 minutes before background refetch
+      gcTime: 1000 * 60 * 60 * 24 * 14,
+      staleTime: 1000 * 60 * 5,
       retry: 3,
       refetchOnWindowFocus: true,
       networkMode: 'offlineFirst',
     },
     mutations: {
-      networkMode: 'offlineFirst', // CRITICAL: Queues writes when offline
-      retry: 3, // Automatically retry failed writes
+      networkMode: 'offlineFirst',
+      retry: 3,
     }
   },
 });
 
-// 2. Storage Persister (Unchanged, already optimal)
+// ------------------------------------------------------------------
+// 2. ASYNC STORAGE ADAPTER
+// ------------------------------------------------------------------
 const idbStorage = {
   getItem: async (key: string) => {
     const val = await get(key);
@@ -40,20 +44,41 @@ const persister = createAsyncStoragePersister({
   storage: idbStorage as any,
 });
 
+// ------------------------------------------------------------------
+// 3. EXPLICIT CACHE DEHYDRATION (The Enterprise Fix)
+// ------------------------------------------------------------------
 persistQueryClient({
   queryClient,
   persister,
   maxAge: 1000 * 60 * 60 * 24 * 14,
-  buster: 'v1.0.2', // Bumped buster to clear old bad cache structures
+  buster: 'v1.0.4', // Bumped to clear previous un-persisted mutation states
+  dehydrateOptions: {
+    shouldDehydrateQuery: (query) => query.state.status === 'success',
+    // COMMAND: Physically save the offline POST/PATCH queue to IndexedDB
+    shouldDehydrateMutation: (mutation) => mutation.state.isPaused, 
+  },
 });
 
-// 3. Router Upgrade: Global Error Boundary & 404 Handlers
+// ------------------------------------------------------------------
+// 4. OFFLINE RECOVERY HANDLERS
+// ------------------------------------------------------------------
+queryClient.resumePausedMutations();
+
+onlineManager.subscribe((isOnline) => {
+  if (isOnline) {
+    console.log('[Sync Engine] Network restored. Firing offline mutation queue.');
+    queryClient.resumePausedMutations();
+  }
+});
+
+// ------------------------------------------------------------------
+// 5. ROUTER & GLOBAL ERROR BOUNDARIES
+// ------------------------------------------------------------------
 const router = createRouter({
   routeTree,
   context: { queryClient },
   defaultPreload: 'intent',
   
-  // Catches missing routes
   defaultNotFoundComponent: () => (
     <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-50 text-slate-900">
       <h1 className="text-4xl font-black mb-4">404</h1>
@@ -64,7 +89,6 @@ const router = createRouter({
     </div>
   ),
 
-  // CRITICAL: Catches API crashes so the app doesn't white-screen
   defaultErrorComponent: ({ error, reset }) => (
     <div className="h-screen w-screen flex flex-col items-center justify-center bg-slate-50 p-6">
       <div className="bg-white p-8 rounded-2xl shadow-xl max-w-lg w-full border border-rose-200 flex flex-col items-center text-center">
@@ -77,8 +101,8 @@ const router = createRouter({
         </p>
         <button 
           onClick={() => {
-            queryClient.clear(); // Nuke the bad cache
-            reset(); // Reset the router
+            queryClient.clear();
+            reset();
           }}
           className="w-full py-3 bg-slate-900 text-white rounded-xl font-bold uppercase tracking-widest text-xs hover:bg-slate-800 transition-all shadow-md"
         >
