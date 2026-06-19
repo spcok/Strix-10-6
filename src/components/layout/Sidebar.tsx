@@ -32,7 +32,7 @@ const navGroups = [
     icon: Stethoscope,
     items: [
       { name: 'Clinical Records', to: '/clinical/records', icon: HeartPulse },
-      { name: 'Medication', to: '/clinical/medication', icon: Syringe },
+      { name: 'Medication', to: '/clinical/medications', icon: Syringe },
       { name: 'Quarantine and Isolation', to: '/clinical/isolation', icon: ShieldAlert },
     ]
   },

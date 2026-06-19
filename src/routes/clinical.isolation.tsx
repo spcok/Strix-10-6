@@ -4,8 +4,9 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { supabase } from '../lib/supabase';
+import { useAuth } from '../lib/auth';
 import { format, parseISO, formatISO } from 'date-fns';
-import { ShieldAlert, Plus, X, Search, Save, Loader2, UserCircle, Activity, Calendar, Lock } from 'lucide-react';
+import { ShieldAlert, Plus, X, Search, Save, Loader2, UserCircle, Calendar, Lock } from 'lucide-react';
 
 // ------------------------------------------------------------------
 // STRICT OFFLINE QUERY OPTIONS & 14-DAY RAM CAP
@@ -16,10 +17,11 @@ const isolationLogsOptions = queryOptions({
     const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase
       .from('isolation_logs')
-      .select('*, animals(name, species)')
+      // Join to get animal details and authorizing user details
+      .select('*, animals(name, species), users:authorized_by(name, initials)')
       .eq('is_deleted', false)
-      // ENTERPRISE FIX: Keep ACTIVE logs forever, otherwise clear after 14 days
-      .or(`status.eq.ACTIVE,start_date.gte.${fourteenDaysAgo}`)
+      // Keep active logs (null end_date) forever, otherwise clear after 14 days
+      .or(`end_date.is.null,start_date.gte.${fourteenDaysAgo}`)
       .order('start_date', { ascending: false });
     if (error) throw error;
     return data || [];
@@ -43,12 +45,29 @@ const activeAnimalsOptions = queryOptions({
   meta: { persist: true }
 });
 
+const staffMembersOptions = queryOptions({
+  queryKey: ['staff_members'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('users').select('id, name, initials, is_deleted, is_active').order('name');
+    if (error) throw error;
+    return data || [];
+  },
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
 export const Route = createFileRoute('/clinical/isolation')({
   loader: async ({ context: { queryClient } }) => {
     // @ts-ignore
     if (queryClient) {
       // @ts-ignore
-      await Promise.all([ queryClient.ensureQueryData(isolationLogsOptions), queryClient.ensureQueryData(activeAnimalsOptions) ]);
+      await Promise.all([ 
+        queryClient.ensureQueryData(isolationLogsOptions), 
+        queryClient.ensureQueryData(activeAnimalsOptions),
+        queryClient.ensureQueryData(staffMembersOptions)
+      ]);
     }
   },
   component: IsolationLogsPage,
@@ -56,6 +75,7 @@ export const Route = createFileRoute('/clinical/isolation')({
 
 export function IsolationLogsPage() {
   const queryClient = useQueryClient();
+  const { user } = useAuth();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'ALL' | 'ACTIVE' | 'CLEARED'>('ALL');
@@ -71,18 +91,19 @@ export function IsolationLogsPage() {
 
   const { data: logs = [], isLoading } = useQuery(isolationLogsOptions);
   const { data: animals = [] } = useQuery(activeAnimalsOptions);
+  const { data: staffMembers = [] } = useQuery(staffMembersOptions);
 
   const filteredLogs = useMemo(() => {
     let filtered = logs;
     if (statusFilter !== 'ALL') {
-      filtered = filtered.filter((l: any) => l.status === statusFilter);
+      filtered = filtered.filter((l: any) => statusFilter === 'ACTIVE' ? !l.end_date : !!l.end_date);
     }
     if (searchQuery) {
       const lower = searchQuery.toLowerCase();
       filtered = filtered.filter((l: any) => 
         (l.animals?.name || '').toLowerCase().includes(lower) ||
         (l.reason || '').toLowerCase().includes(lower) ||
-        (l.authorized_by || '').toLowerCase().includes(lower)
+        (l.users?.name || '').toLowerCase().includes(lower) // Search by authorizing staff name
       );
     }
     return filtered;
@@ -98,7 +119,11 @@ export function IsolationLogsPage() {
 
   const completeIsolationMutation = useMutation({
     mutationFn: async (id: string) => {
-      const { error } = await supabase.from('isolation_logs').update({ status: 'CLEARED', end_date: new Date().toISOString() }).eq('id', id);
+      // SCHEMA FIX: Supply modified_by to clear the quarantine safely
+      const { error } = await supabase.from('isolation_logs').update({ 
+        end_date: new Date().toISOString(),
+        modified_by: user!.id 
+      }).eq('id', id);
       if (error) throw error;
     },
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['isolation_logs'] })
@@ -141,7 +166,7 @@ export function IsolationLogsPage() {
           <div className="col-span-2 text-right">Action</div>
         </div>
 
-        <div className="overflow-auto h-[calc(100%-53px)] custom-scrollbar min-w-[900px]">
+        <div className="overflow-auto h-[calc(100%-53px)] custom-scrollbar min-w-[900px]" ref={scrollParentRef}>
           {filteredLogs.length === 0 && !isLoading ? (
             <div className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No isolation records found.</div>
           ) : (
@@ -150,7 +175,7 @@ export function IsolationLogsPage() {
                 const log = filteredLogs[virtualRow.index];
                 const startDateObj = new Date(log.start_date);
                 const endDateObj = log.end_date ? new Date(log.end_date) : null;
-                const isActive = log.status === 'ACTIVE';
+                const isActive = !log.end_date;
 
                 return (
                   <div key={log.id} className="absolute top-0 left-0 w-full transition-colors border-b border-slate-100 hover:bg-slate-50/60" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}>
@@ -162,14 +187,18 @@ export function IsolationLogsPage() {
                             {log.animals?.species || 'Unknown'}
                           </span>
                           <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest border ${isActive ? 'bg-rose-50 text-rose-700 border-rose-200 animate-pulse' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
-                            {log.status}
+                            {isActive ? 'ACTIVE' : 'CLEARED'}
                           </span>
                         </div>
                       </div>
                       <div className="col-span-4 space-y-1 pr-4">
-                        <p className="text-xs font-bold text-slate-900 line-clamp-1"><ShieldAlert size={12} className={`inline mr-1 ${isActive ? 'text-rose-500' : 'text-slate-400'}`} />{log.reason}</p>
+                        <div className="flex items-center gap-1.5">
+                           <ShieldAlert size={12} className={isActive ? 'text-rose-500' : 'text-slate-400'} />
+                           <span className="text-[9px] font-black text-slate-400 uppercase tracking-widest bg-slate-100 border border-slate-200 px-1.5 py-0.5 rounded shadow-sm">{log.isolation_type.replace(/_/g, ' ')}</span>
+                        </div>
+                        <p className="text-xs font-bold text-slate-900 line-clamp-1">{log.reason}</p>
                         <p className="text-[10px] font-medium text-slate-600 line-clamp-2">{log.notes || 'No additional notes provided.'}</p>
-                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1"><UserCircle size={10} className="inline mr-1" /> Auth: {log.authorized_by}</p>
+                        <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-1"><UserCircle size={10} className="inline mr-1" /> Auth: {log.users?.name || 'Unknown'}</p>
                       </div>
                       <div className="col-span-3 flex flex-col gap-1.5">
                         <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-slate-100 border border-slate-200 text-[9px] font-black text-slate-600 uppercase tracking-widest w-fit">
@@ -177,7 +206,7 @@ export function IsolationLogsPage() {
                         </span>
                         {endDateObj ? (
                           <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded border text-[9px] font-black uppercase tracking-widest w-fit ${isActive ? 'bg-amber-50 border-amber-200 text-amber-700' : 'bg-emerald-50 border-emerald-200 text-emerald-700'}`}>
-                            <Calendar size={10} /> {isActive ? 'Target End:' : 'Cleared:'} {format(endDateObj, 'dd MMM yyyy')}
+                            <Calendar size={10} /> Cleared: {format(endDateObj, 'dd MMM yyyy')}
                           </span>
                         ) : (
                           <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">Indefinite Quarantine</span>
@@ -185,8 +214,8 @@ export function IsolationLogsPage() {
                       </div>
                       <div className="col-span-2 flex justify-end">
                         {isActive ? (
-                          <button onClick={() => completeIsolationMutation.mutate(log.id)} disabled={completeIsolationMutation.isPending} className="px-4 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 font-black text-[10px] uppercase tracking-widest rounded-lg transition-colors shadow-sm disabled:opacity-50">
-                            Clear Quarantine
+                          <button onClick={() => completeIsolationMutation.mutate(log.id)} disabled={completeIsolationMutation.isPending} className="px-4 py-1.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 font-black text-[10px] uppercase tracking-widest rounded-lg transition-colors shadow-sm disabled:opacity-50 flex items-center gap-2">
+                            {completeIsolationMutation.isPending && <Loader2 size={12} className="animate-spin" />} Clear Quarantine
                           </button>
                         ) : (
                           <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Completed</span>
@@ -201,15 +230,12 @@ export function IsolationLogsPage() {
         </div>
       </div>
 
-      {isModalOpen && <IsolationModal onClose={() => setIsModalOpen(false)} animals={animals} />}
+      {isModalOpen && <IsolationModal onClose={() => setIsModalOpen(false)} animals={animals} staffMembers={staffMembers} userId={user!.id} />}
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// TANSTACK FORM MODAL (Temporal Fix & Modal Hang Prevented)
-// ---------------------------------------------------------------------------
-function IsolationModal({ onClose, animals }: { onClose: () => void, animals: any[] }) {
+function IsolationModal({ onClose, animals, staffMembers, userId }: { onClose: () => void, animals: any[], staffMembers: any[], userId: string }) {
   const queryClient = useQueryClient();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -227,6 +253,7 @@ function IsolationModal({ onClose, animals }: { onClose: () => void, animals: an
   const form = useForm({
     defaultValues: {
       animal_id: '',
+      isolation_type: 'QUARANTINE',
       start_date: format(new Date(), 'yyyy-MM-dd'),
       end_date: '',
       reason: '',
@@ -236,23 +263,24 @@ function IsolationModal({ onClose, animals }: { onClose: () => void, animals: an
     onSubmit: ({ value }) => {
       setErrorMsg(null);
       
-      // 1. TEMPORAL FIX: Strict ISO format parsing
       const parsedStartDate = formatISO(parseISO(value.start_date));
       const parsedEndDate = value.end_date ? formatISO(parseISO(value.end_date)) : null;
 
+      // SCHEMA FIX: Supplied created_by and modified_by, matching NOT NULL constraints
       const payload = {
-        id: crypto.randomUUID(), // 2. UUID FIX
+        id: crypto.randomUUID(), 
         animal_id: value.animal_id,
+        isolation_type: value.isolation_type,
         start_date: parsedStartDate,
         end_date: parsedEndDate,
         reason: value.reason,
         notes: value.notes || null,
-        authorized_by: value.authorized_by,
-        status: 'ACTIVE',
-        is_deleted: false
+        authorized_by: value.authorized_by || null,
+        is_deleted: false,
+        created_by: userId,
+        modified_by: userId
       };
 
-      // 3. MODAL HANG FIX: Fire and forget mutate + instant close
       saveMutation.mutate(payload);
       onClose();
     }
@@ -275,7 +303,7 @@ function IsolationModal({ onClose, animals }: { onClose: () => void, animals: an
           {errorMsg && <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold shadow-sm">{errorMsg}</div>}
 
           <div className="bg-rose-50 border border-rose-200 p-4 rounded-xl flex items-start gap-3">
-             <AlertCircle size={20} className="text-rose-600 shrink-0 mt-0.5" />
+             <ShieldAlert size={20} className="text-rose-600 shrink-0 mt-0.5" />
              <div>
                 <p className="text-xs font-black text-rose-900 uppercase tracking-tight">Biosecurity Alert</p>
                 <p className="text-[10px] font-bold text-rose-700 mt-1">Initiating this log flags the animal across the entire StrixOS system as isolated. General keepers will be warned.</p>
@@ -289,6 +317,20 @@ function IsolationModal({ onClose, animals }: { onClose: () => void, animals: an
                 <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                   <option value="">-- Select Patient --</option>
                   {animals.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({a.species})</option>)}
+                </select>
+              </div>
+            )}
+          </form.Field>
+
+          <form.Field name="isolation_type">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Isolation Protocol Type</label>
+                <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <option value="QUARANTINE">Full Quarantine (Inbound/Contagion)</option>
+                  <option value="MEDICAL_OBSERVATION">Medical Observation</option>
+                  <option value="BEHAVIORAL_SEPARATION">Behavioral Separation</option>
+                  <option value="DIETARY_RESTRICTION">Dietary Restriction</option>
                 </select>
               </div>
             )}
@@ -334,8 +376,14 @@ function IsolationModal({ onClose, animals }: { onClose: () => void, animals: an
           <form.Field name="authorized_by">
             {(field) => (
               <div>
-                <label className={labelClass}>Authorized By (Vet / Manager Name)</label>
-                <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. Dr. Smith" className={inputClass} />
+                <label className={labelClass}>Authorized By (Manager/Vet)</label>
+                <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                  <option value="">-- Select Authorizing Staff --</option>
+                  {staffMembers
+                    .filter((s: any) => !s.is_deleted && s.is_active !== false)
+                    .map((s: any) => <option key={s.id} value={s.id}>{s.name} {s.initials ? `(${s.initials})` : ''}</option>)
+                  }
+                </select>
               </div>
             )}
           </form.Field>

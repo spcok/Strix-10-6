@@ -101,10 +101,16 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     }
   });
 
+  // ENTERPRISE FIX: Corrected category matching and order logic
   const { data: locations = [] } = useQuery({
-    queryKey: ['operational_lists', 'LOCATION'],
+    queryKey: ['operational_lists', 'location'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('operational_lists').select('id, name').eq('category', 'LOCATION').eq('is_deleted', false).order('display_order');
+      const { data, error } = await supabase
+        .from('operational_lists')
+        .select('id, name')
+        .eq('category', 'location')
+        .eq('is_deleted', false)
+        .order('name');
       if (error) throw error;
       return data;
     }
@@ -376,7 +382,20 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 </div>
 
                 <form.Field name="name">{(field) => <FormInput field={field as any} label="Animal / Group Name" placeholder="e.g. Apollo" />}</form.Field>
-                <form.Field name="location">{(field) => <FormSelect field={field as any} label="Current Enclosure / Location" options={[{ value: '', label: '-- Unassigned --' }, ...locations.map((l: any) => ({ value: l.id, label: l.name }))]} />}</form.Field>
+                
+                {/* ENTERPRISE FIX: Mapped correctly to save the Location 'name' string so Internal Movements grids don't display a UUID */}
+                <form.Field name="location">
+                  {(field) => (
+                    <FormSelect 
+                      field={field as any} 
+                      label="Current Enclosure / Location" 
+                      options={[
+                        { value: '', label: '-- Unassigned --' }, 
+                        ...locations.map((l: any) => ({ value: l.name, label: l.name }))
+                      ]} 
+                    />
+                  )}
+                </form.Field>
                 
                 <form.Field name="census_count">{(field) => <FormInput field={field as any} label="Census Count (Headcount)" type="number" />}</form.Field>
                 <form.Field name="species">{(field) => <FormInput field={field as any} label="Common Species" placeholder="e.g. Golden Eagle" />}</form.Field>
