@@ -3,11 +3,15 @@ import { DailyLog } from '../types';
 
 export const dailyLogService = {
   async getLogsByAnimal(animalId: string): Promise<DailyLog[]> {
+    // ENTERPRISE FIX: 14-Day Rolling Window to prevent Offline RAM Exhaustion
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
     const { data, error } = await supabase
       .from('daily_logs')
       .select('*')
       .eq('animal_id', animalId)
       .eq('is_deleted', false)
+      .gte('log_date', fourteenDaysAgo) // Strict cutoff
       .order('log_date', { ascending: false });
 
     if (error) throw error;
@@ -15,7 +19,6 @@ export const dailyLogService = {
   },
 
   async commitLog(payload: Partial<DailyLog>) {
- 
     if (!payload.id) {
       payload.id = crypto.randomUUID();
     }

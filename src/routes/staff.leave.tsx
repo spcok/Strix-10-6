@@ -4,13 +4,13 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { Umbrella, Plus, Loader2, CheckCircle, XCircle, Trash2, Calendar } from 'lucide-react';
-import { format, parseISO, differenceInDays } from 'date-fns';
+import { format, parseISO, formatISO, differenceInDays } from 'date-fns';
 import { useAuth } from '../lib/auth';
 import { supabase } from '../lib/supabase';
 import { leaveService } from '../services/leaveService';
 
 // ------------------------------------------------------------------
-// 1. STRICT OFFLINE QUERY OPTIONS
+// STRICT OFFLINE QUERY OPTIONS
 // ------------------------------------------------------------------
 const getLeaveRequestsOptions = (activeTab: 'MY_REQUESTS' | 'APPROVALS', userId: string | undefined, isManager: boolean) => queryOptions({
   queryKey: ['leave_requests', activeTab, userId],
@@ -28,9 +28,6 @@ export const Route = createFileRoute('/staff/leave')({
   component: LeaveDashboardPage,
 });
 
-// ------------------------------------------------------------------
-// 2. MAIN COMPONENT
-// ------------------------------------------------------------------
 export function LeaveDashboardPage() {
   const queryClient = useQueryClient();
   const { user, profile } = useAuth();
@@ -40,26 +37,13 @@ export function LeaveDashboardPage() {
   const [activeTab, setActiveTab] = useState<'MY_REQUESTS' | 'APPROVALS'>('MY_REQUESTS');
   const [isModalOpen, setIsModalOpen] = useState(false);
 
-  // ------------------------------------------------------------------
-  // SUPABASE REALTIME CACHE INVALIDATION
-  // ------------------------------------------------------------------
   useEffect(() => {
-    const channel = supabase
-      .channel('leave-db-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'leave' },
-        (payload) => {
-          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
-          queryClient.invalidateQueries({ queryKey: ['leave_requests'] });
-          queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    const channel = supabase.channel('leave-db-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'leave_requests' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['leave_requests'] });
+        queryClient.invalidateQueries({ queryKey: ['rota_matrix'] });
+      }).subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
   const { data: requests = [], isLoading } = useQuery(getLeaveRequestsOptions(activeTab, user?.id, isManager));
@@ -68,7 +52,7 @@ export function LeaveDashboardPage() {
     mutationFn: ({ id, status }: { id: string, status: 'APPROVED' | 'REJECTED' }) => leaveService.updateStatus(id, status, user!.id),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['leave_requests'] });
-      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] }); // Sync with Rota
+      queryClient.invalidateQueries({ queryKey: ['rota_matrix'] }); 
     }
   });
 
@@ -79,19 +63,15 @@ export function LeaveDashboardPage() {
 
   const pendingCount = isManager && activeTab === 'APPROVALS' ? requests.filter((r: any) => r.status === 'PENDING').length : 0;
 
-  // ------------------------------------------------------------------
-  // 3. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
-  // ------------------------------------------------------------------
   const rowVirtualizer = useWindowVirtualizer({
     count: requests.length,
-    estimateSize: () => 80, // Estimated pixel height of a leave row
+    estimateSize: () => 80, 
     overscan: 5,
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
   const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
-
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-20">
@@ -123,9 +103,11 @@ export function LeaveDashboardPage() {
       </div>
 
       {/* Ledger */}
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden min-h-[500px]">
-        <div className="overflow-x-auto w-full">
-          <table className="w-full text-left">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden min-h-[500px] relative">
+         {isLoading && <div className="absolute inset-0 bg-white/60 backdrop-blur-sm z-20 flex justify-center items-center"><Loader2 className="animate-spin text-indigo-600 w-8 h-8" /></div>}
+        
+        <div className="overflow-x-auto w-full custom-scrollbar">
+          <table className="w-full text-left min-w-[800px]">
             <thead className="bg-slate-50 border-b border-slate-200">
               <tr>
                 <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest">Type & Dates</th>
@@ -136,10 +118,8 @@ export function LeaveDashboardPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {isLoading ? (
-                <tr><td colSpan={5} className="p-10 text-center"><Loader2 className="animate-spin text-indigo-600 mx-auto" /></td></tr>
-              ) : requests.length === 0 ? (
-                <tr><td colSpan={5} className="p-10 text-center text-xs font-bold text-slate-400 uppercase tracking-widest">No requests found.</td></tr>
+              {requests.length === 0 && !isLoading ? (
+                <tr><td colSpan={5} className="p-12 text-center text-xs font-bold text-slate-400 uppercase tracking-widest">No requests found.</td></tr>
               ) : (
                 <>
                   {paddingTop > 0 && <tr><td colSpan={5} style={{ height: `${paddingTop}px` }} /></tr>}
@@ -147,7 +127,7 @@ export function LeaveDashboardPage() {
                     const req = requests[virtualRow.index];
                     const sDate = parseISO(req.start_date);
                     const eDate = parseISO(req.end_date);
-                    const days = differenceInDays(eDate, sDate) + 1; // +1 to include both start and end days
+                    const days = differenceInDays(eDate, sDate) + 1; 
                     
                     return (
                       <tr key={req.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors">
@@ -188,7 +168,6 @@ export function LeaveDashboardPage() {
                               </button>
                             </div>
                           ) : (
-                            // Allow deletion only if pending, or if manager is cleaning up
                             (req.status === 'PENDING' || isManager) && (
                               <button onClick={() => deleteMutation.mutate(req.id)} className="p-1.5 text-slate-400 hover:text-rose-600 rounded-lg transition-colors" title="Delete/Cancel Request">
                                 <Trash2 size={16} />
@@ -213,7 +192,7 @@ export function LeaveDashboardPage() {
 }
 
 // ============================================================================
-// MODAL: SUBMIT NEW REQUEST (TANSTACK FORM ARCHITECTURE)
+// MODAL: SUBMIT NEW REQUEST (TANSTACK FORM)
 // ============================================================================
 function LeaveRequestModal({ onClose, userId }: { onClose: () => void, userId: string }) {
   const queryClient = useQueryClient();
@@ -223,7 +202,6 @@ function LeaveRequestModal({ onClose, userId }: { onClose: () => void, userId: s
     mutationFn: async (payload: any) => leaveService.submitRequest(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['leave_requests'] });
-      onClose();
     },
     onError: (err: any) => setErrorMsg(err.message || 'Failed to submit request.')
   });
@@ -235,22 +213,29 @@ function LeaveRequestModal({ onClose, userId }: { onClose: () => void, userId: s
       leave_type: 'ANNUAL_LEAVE',
       reason: ''
     },
-    onSubmit: async ({ value }) => {
+    onSubmit: ({ value }) => {
       setErrorMsg(null);
 
-      // Basic Validation
       if (parseISO(value.end_date) < parseISO(value.start_date)) {
         setErrorMsg('End date cannot be before start date.');
         return;
       }
 
-      await saveMutation.mutateAsync({
-        user_id: userId,
-        start_date: value.start_date,
-        end_date: value.end_date,
-        leave_type: value.leave_type,
-        reason: value.reason
-      });
+      // ENTERPRISE FIX: Strict ISO Temporal Formatting for offline queues
+      const payload = {
+         id: crypto.randomUUID(),
+         user_id: userId,
+         start_date: formatISO(parseISO(value.start_date), { representation: 'date' }),
+         end_date: formatISO(parseISO(value.end_date), { representation: 'date' }),
+         leave_type: value.leave_type,
+         reason: value.reason,
+         status: 'PENDING',
+         is_deleted: false
+      };
+
+      // MODAL HANG FIX: Fire and forget mutate + instant close
+      saveMutation.mutate(payload);
+      onClose();
     }
   });
 
@@ -315,8 +300,8 @@ function LeaveRequestModal({ onClose, userId }: { onClose: () => void, userId: s
             <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
             <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
               {([canSubmit, isSubmitting]) => (
-                <button type="submit" disabled={!canSubmit || isSubmitting as boolean || saveMutation.isPending} className="px-6 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
-                  {(isSubmitting || saveMutation.isPending) && <Loader2 size={14} className="animate-spin"/>} Submit Request
+                <button type="submit" disabled={!canSubmit || isSubmitting as boolean} className="px-6 py-2 bg-indigo-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-indigo-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
+                  {isSubmitting && <Loader2 size={14} className="animate-spin"/>} Submit Request
                 </button>
               )}
             </form.Subscribe>

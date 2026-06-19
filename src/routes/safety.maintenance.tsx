@@ -100,7 +100,7 @@ export function MaintenanceTicketsPage() {
   // ------------------------------------------------------------------
   const rowVirtualizer = useWindowVirtualizer({
     count: filteredTickets.length,
-    estimateSize: () => 80, // Estimated pixel height of a ticket row
+    estimateSize: () => 80, 
     overscan: 5,
   });
 
@@ -227,7 +227,7 @@ export function MaintenanceTicketsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// NEW TICKET MODAL COMPONENT (Unchanged - already built on React 19 Form action)
+// NEW TICKET MODAL COMPONENT
 // ---------------------------------------------------------------------------
 function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staffMembers: any[] }) {
   const queryClient = useQueryClient();
@@ -351,7 +351,9 @@ function MaintenanceModal({ onClose, staffMembers }: { onClose: () => void, staf
                   <label className={`${labelClass} text-blue-700 flex items-center gap-1.5`}><HardHat size={14} /> Assign Technician</label>
                   <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                     <option value="">-- Unassigned (Open Queue) --</option>
-                    {staffMembers.map((staff: any) => (
+                    {staffMembers
+                      .filter((staff: any) => !staff.is_deleted && staff.is_active !== false) // ENTERPRISE FIX: Hide deleted staff from new assignments
+                      .map((staff: any) => (
                       <option key={staff.id} value={staff.id}>{staff.name || staff.email}</option>
                     ))}
                   </select>

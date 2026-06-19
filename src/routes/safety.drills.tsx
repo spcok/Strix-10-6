@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { supabase } from '../lib/supabase';
-import { format } from 'date-fns';
+import { format, parseISO, formatISO } from 'date-fns';
 import { ShieldAlert, Plus, Loader2, Clock, AlertTriangle, CheckCircle, X, Search } from 'lucide-react';
 import { SafetyDrill } from '../types';
 
@@ -44,7 +44,6 @@ export function SafetyDrillsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   
-  // Realtime Cache Invalidation
   useEffect(() => {
     const channel = supabase.channel('safety-drills-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'safety_drills' }, () => {
@@ -202,11 +201,12 @@ function DrillModal({ onClose }: { onClose: () => void }) {
 
   const saveMutation = useMutation({
     mutationFn: async (payload: any) => {
-      // Ensure date format is strict ISO
+      // ENTERPRISE FIX: Use strictly formatted ISO string with local timezone offset
       const payloadToSubmit = {
         ...payload,
-        drill_date: new Date(payload.drill_date).toISOString(),
+        drill_date: formatISO(parseISO(payload.drill_date)),
       };
+      
       const { error } = await supabase.from('safety_drills').insert([payloadToSubmit]);
       if (error) throw error;
     },

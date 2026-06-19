@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { BriefcaseMedical, Plus, X, Search, Activity, Save, Loader2, Stethoscope, UserCircle, Ambulance, AlertTriangle } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, formatISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { firstAidService, StaffMember } from '../services/firstAidService';
@@ -98,7 +98,7 @@ export function FirstAidPage() {
   // ------------------------------------------------------------------
   const rowVirtualizer = useWindowVirtualizer({
     count: filteredLogs.length,
-    estimateSize: () => 100, // Estimated pixel height of a clinical record row
+    estimateSize: () => 100, 
     overscan: 5,
   });
 
@@ -235,7 +235,7 @@ export function FirstAidPage() {
 }
 
 // ---------------------------------------------------------------------------
-// COMPOUND MODAL COMPONENT (Unchanged - already built on React 19 Form action)
+// COMPOUND MODAL COMPONENT 
 // ---------------------------------------------------------------------------
 function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void, userId?: string, staffMembers: StaffMember[] }) {
   const queryClient = useQueryClient();
@@ -275,7 +275,8 @@ function FirstAidModal({ onClose, userId, staffMembers }: { onClose: () => void,
     onSubmit: async ({ value }) => {
       setErrorMsg(null);
       
-      const parsedDate = parseISO(value.incident_date).toISOString();
+      // ENTERPRISE FIX: Strict ISO output with timezone offset retained
+      const parsedDate = formatISO(parseISO(value.incident_date));
 
       const firstAidPayload = {
         incident_date: parsedDate,

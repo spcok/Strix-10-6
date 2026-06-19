@@ -2,14 +2,6 @@ import { supabase } from '../lib/supabase';
 import { addDays, format, parseISO, getDay } from 'date-fns';
 
 export const rotaService = {
-  // ==========================================
-  // READ OPERATIONS (Grid & Dashboard Feeds)
-  // ==========================================
-
-  /**
-   * Fetches the compound payload required for the Rota Grid.
-   * Cached by TanStack Query for offline failover.
-   */
   async getRotaData(startStr: string, endStr: string) {
     const [shifts, leave, staff] = await Promise.all([
       supabase
@@ -26,8 +18,8 @@ export const rotaService = {
         .eq('is_deleted', false),
       supabase
         .from('users')
-        .select('id, name, initials, role')
-        .eq('is_deleted', false)
+        // ENTERPRISE FIX: Fetch all staff so historical shift grids render correctly
+        .select('id, name, initials, role, is_deleted, is_active')
         .order('name')
     ]);
     
@@ -35,20 +27,14 @@ export const rotaService = {
     if (leave.error) throw leave.error;
     if (staff.error) throw staff.error;
 
-    return { 
-      shifts: shifts.data || [], 
-      leave: leave.data || [], 
-      staff: staff.data || [] 
-    };
+    return { shifts: shifts.data || [], leave: leave.data || [], staff: staff.data || [] };
   },
 
   async getStaffRoster() {
     const { data, error } = await supabase
       .from('users')
-      .select('id, name, initials, role')
-      .eq('is_deleted', false)
+      .select('id, name, initials, role, is_deleted, is_active')
       .order('name');
-      
     if (error) throw error;
     return data;
   },
@@ -59,14 +45,9 @@ export const rotaService = {
       .select('*')
       .eq('is_deleted', false)
       .order('created_at', { ascending: false });
-      
     if (error) throw error;
     return data;
   },
-
-  // ==========================================
-  // WRITE OPERATIONS (Ad-Hoc & Leave)
-  // ==========================================
 
   async saveShift(payload: any) {
     const { data, error } = await supabase
@@ -74,7 +55,6 @@ export const rotaService = {
       .insert([{ ...payload, is_deleted: false }])
       .select()
       .single();
-      
     if (error) throw error;
     return data;
   },
@@ -84,7 +64,6 @@ export const rotaService = {
       .from('shifts')
       .update({ is_deleted: true })
       .eq('id', id);
-      
     if (error) throw error;
     return true;
   },
@@ -95,14 +74,9 @@ export const rotaService = {
       .insert([{ ...payload, is_deleted: false, status: payload.status || 'APPROVED' }])
       .select()
       .single();
-      
     if (error) throw error;
     return data;
   },
-
-  // ==========================================
-  // MACRO OPERATIONS (Pattern Deployment)
-  // ==========================================
 
   async savePattern(payload: any) {
     const { data, error } = await supabase
@@ -110,31 +84,14 @@ export const rotaService = {
       .insert([{ ...payload, is_deleted: false }])
       .select()
       .single();
-      
     if (error) throw error;
     return data;
   },
 
-  /**
-   * Compiles a 7-day pattern blueprint into discrete database rows.
-   * STRICT HORIZON: Clamped to 90 days maximum to prevent database bloat.
-   */
   async deployPattern(patternId: string, userId: string, pattern: any, startDateStr: string, days: number = 28) {
     const startDate = parseISO(startDateStr);
     const shifts = [];
-    
-    // Map date-fns getDay() (0=Sunday, 1=Monday) to the schema columns
-    const daysMap = [
-      pattern.sunday, 
-      pattern.monday, 
-      pattern.tuesday, 
-      pattern.wednesday, 
-      pattern.thursday, 
-      pattern.friday, 
-      pattern.saturday
-    ];
-
-    // Architectural Safety: Hard clamp deployment horizon
+    const daysMap = [pattern.sunday, pattern.monday, pattern.tuesday, pattern.wednesday, pattern.thursday, pattern.friday, pattern.saturday];
     const deploymentHorizon = Math.min(days, 90);
 
     for (let i = 0; i < deploymentHorizon; i++) {
@@ -153,12 +110,10 @@ export const rotaService = {
       }
     }
     
-    if (shifts.length === 0) return true; // Nothing to deploy
+    if (shifts.length === 0) return true; 
 
-    // Batch insert for network efficiency
     const { error } = await supabase.from('shifts').insert(shifts);
     if (error) throw error;
-    
     return true;
   }
 };

@@ -2,10 +2,14 @@ import { supabase } from '../lib/supabase';
 
 export const timesheetService = {
   async getTimesheets(userIdFilter?: string) {
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+
     let query = supabase
       .from('timesheets')
       .select('*')
       .eq('is_deleted', false)
+      // ENTERPRISE FIX: 14-day limit for offline payload size
+      .gte('shift_date', fourteenDaysAgo.split('T')[0])
       .order('clock_in_time', { ascending: false });
 
     if (userIdFilter && userIdFilter !== 'ALL') {
@@ -43,7 +47,6 @@ export const timesheetService = {
   },
 
   async clockIn(payload: { id?: string; shift_date: string; clock_in_time: string }) {
-    // ENTERPRISE FIX: Lock UUID for offline retries
     if (!payload.id) {
       payload.id = crypto.randomUUID();
     }

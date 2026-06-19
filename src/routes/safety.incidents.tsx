@@ -4,7 +4,7 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { ShieldAlert, Plus, X, Search, Save, Loader2, AlertTriangle, CheckCircle2, FileText, Clock, BriefcaseMedical, UserCircle, Activity, Ambulance } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, formatISO } from 'date-fns';
 import { useAuth } from '../lib/auth';
 import { incidentService } from '../services/incidentService';
 import { firstAidService, StaffMember } from '../services/firstAidService';
@@ -77,7 +77,7 @@ export function IncidentsPage() {
   const rowVirtualizer = useVirtualizer({
     count: filteredIncidents.length,
     getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 100, // Generous estimate for incident rows
+    estimateSize: () => 100, 
     overscan: 5,
   });
 
@@ -251,7 +251,7 @@ export function IncidentsPage() {
 }
 
 // ---------------------------------------------------------------------------
-// COMPOUND INCIDENT MODAL (Kept identical to prior version structurally, just utilizing React 19 Action forms)
+// COMPOUND INCIDENT MODAL 
 // ---------------------------------------------------------------------------
 function CompoundIncidentModal({ onClose, userId, staffMembers }: { onClose: () => void, userId?: string, staffMembers: StaffMember[] }) {
   const queryClient = useQueryClient();
@@ -280,7 +280,9 @@ function CompoundIncidentModal({ onClose, userId, staffMembers }: { onClose: () 
     },
     onSubmit: async ({ value }) => {
       setErrorMsg(null);
-      const parsedDate = parseISO(value.incident_date).toISOString();
+      
+      // ENTERPRISE FIX: Strict ISO output with timezone offset retained
+      const parsedDate = formatISO(parseISO(value.incident_date));
 
       const incidentPayload = {
         title: value.title, incident_date: parsedDate, incident_type: value.incident_type,
@@ -401,7 +403,7 @@ function CompoundIncidentModal({ onClose, userId, staffMembers }: { onClose: () 
 }
 
 // ---------------------------------------------------------------------------
-// RESOLUTION MODAL COMPONENT (Migrated to TanStack Form)
+// RESOLUTION MODAL COMPONENT
 // ---------------------------------------------------------------------------
 function ResolutionModal({ incident, onClose, mutation }: { incident: any, onClose: () => void, mutation: any }) {
   const form = useForm({

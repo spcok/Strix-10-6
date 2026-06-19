@@ -116,16 +116,28 @@ export function RotaPage() {
     return { shiftMap: sMap, leaveMap: lMap };
   }, [data]);
 
+  // ENTERPRISE FIX: Filter staff accurately for the grid matrix
   const filteredStaff = useMemo(() => {
     if (!data?.staff) return [];
-    if (!searchQuery.trim()) return data.staff;
+    
+    // Only display staff on the grid if they are active, OR if they are deleted but had a shift/leave assigned in this exact view window
+    let visibleStaff = data.staff.filter((s: any) => {
+      if (!s.is_deleted && s.is_active !== false) return true;
+      
+      return matrixDays.some(date => {
+        const lookupKey = `${s.id}_${format(date, 'yyyy-MM-dd')}`;
+        return shiftMap[lookupKey] || leaveMap[lookupKey];
+      });
+    });
+
+    if (!searchQuery.trim()) return visibleStaff;
     
     const query = searchQuery.toLowerCase();
-    return data.staff.filter((s: any) => 
+    return visibleStaff.filter((s: any) => 
       (s.name || '').toLowerCase().includes(query) || 
       (s.role || '').toLowerCase().includes(query)
     );
-  }, [data?.staff, searchQuery]);
+  }, [data?.staff, searchQuery, matrixDays, shiftMap, leaveMap]);
 
   const handlePrev = () => {
     if (view === 'DAILY') setBaseDate(addDays(baseDate, -1));
@@ -145,7 +157,7 @@ export function RotaPage() {
   const rowVirtualizer = useVirtualizer({
     count: filteredStaff.length,
     getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 64, // Approximate min-h of staff rows
+    estimateSize: () => 64, 
     overscan: 5,
   });
 
@@ -404,7 +416,10 @@ function ShiftModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
                 <label className={labelClass}>Staff Member</label>
                 <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                   <option value="">Select Staff...</option>
-                  {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
+                  {/* ENTERPRISE FIX: Prevent assigning new shifts to deleted staff */}
+                  {staff
+                    .filter((s: any) => !s.is_deleted && s.is_active !== false)
+                    .map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
                 </select>
               </div>
             )}
@@ -529,7 +544,10 @@ function LeaveModal({ onClose, staff }: { onClose: () => void, staff: any[] }) {
                 <label className={labelClass}>Staff Member</label>
                 <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                   <option value="">Select Staff...</option>
-                  {staff.map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
+                  {/* ENTERPRISE FIX: Prevent assigning new leave to deleted staff */}
+                  {staff
+                    .filter((s: any) => !s.is_deleted && s.is_active !== false)
+                    .map((s: any) => <option key={s.id} value={s.id}>{s.name || s.email}</option>)}
                 </select>
               </div>
             )}

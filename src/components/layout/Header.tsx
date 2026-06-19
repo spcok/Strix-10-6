@@ -1,6 +1,6 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { Menu, UserCircle, PlayCircle, StopCircle, Loader2 } from 'lucide-react';
+import { Menu, UserCircle, PlayCircle, StopCircle, Loader2, CloudOff, CloudUpload, Wifi } from 'lucide-react';
 import { format, formatISO } from 'date-fns';
 import { useAuth } from '../../lib/auth';
 import { timesheetService } from '../../services/timesheetService';
@@ -12,6 +12,36 @@ interface HeaderProps {
 export function Header({ onMenuClick }: HeaderProps) {
   const queryClient = useQueryClient();
   const { user, profile } = useAuth();
+  
+  // ENTERPRISE FIX: Offline Queue Telemetry
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [pausedCount, setPausedCount] = useState(0);
+
+  useEffect(() => {
+    // 1. Network event listeners
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    // 2. Direct subscription to the TanStack Mutation Cache to track offline payloads
+    const mutationCache = queryClient.getMutationCache();
+    
+    const updatePausedCount = () => {
+      const count = mutationCache.getAll().filter(m => m.state.isPaused).length;
+      setPausedCount(count);
+    };
+
+    updatePausedCount(); // Initial check
+    const unsubscribe = mutationCache.subscribe(updatePausedCount);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      unsubscribe();
+    };
+  }, [queryClient]);
 
   const { data: activeShift, isLoading: isLoadingShift } = useQuery({
     queryKey: ['my_active_shift', user?.id],
@@ -24,7 +54,6 @@ export function Header({ onMenuClick }: HeaderProps) {
       const now = new Date();
       await timesheetService.clockIn({
         shift_date: format(now, 'yyyy-MM-dd'),
-        // ENTERPRISE FIX: Use date-fns formatISO to capture precise local timezone offset
         clock_in_time: formatISO(now) 
       });
     },
@@ -37,7 +66,6 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const clockOutMutation = useMutation({
     mutationFn: async (id: string) => {
-      // ENTERPRISE FIX: Strict local formatting
       await timesheetService.clockOut(id, formatISO(new Date()));
     },
     onSuccess: () => {
@@ -59,6 +87,26 @@ export function Header({ onMenuClick }: HeaderProps) {
       </div>
 
       <div className="flex items-center gap-4">
+        
+        {/* ENTERPRISE FIX: Telemetry Gauge */}
+        <div className="hidden sm:flex items-center mr-2">
+          {!isOnline ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 border border-rose-200 text-rose-700 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm transition-all duration-300">
+              <CloudOff size={14} /> Offline
+              {pausedCount > 0 && (
+                <span className="ml-1 bg-rose-200 text-rose-800 px-2 py-0.5 rounded-full flex items-center gap-1">
+                  {pausedCount} <span className="hidden md:inline">Queued</span>
+                </span>
+              )}
+            </div>
+          ) : pausedCount > 0 ? (
+            <div className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-700 rounded-lg text-[10px] font-black uppercase tracking-widest shadow-sm transition-all duration-300">
+              <CloudUpload size={14} className="animate-pulse" /> Syncing
+              <span className="ml-1 bg-amber-200 text-amber-800 px-2 py-0.5 rounded-full">{pausedCount}</span>
+            </div>
+          ) : null}
+        </div>
+
         <div className="hidden sm:flex items-center">
           {isLoadingShift ? (
             <div className="px-4 py-1.5 bg-slate-50 rounded-lg border border-slate-100 flex items-center justify-center min-w-[120px]">

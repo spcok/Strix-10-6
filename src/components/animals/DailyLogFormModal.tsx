@@ -14,7 +14,6 @@ interface DailyLogFormModalProps {
   initialLogData?: DailyLog;
 }
 
-// Type definitions to eliminate "as any" bypasses
 interface MealInput {
   id: string;
   food_item: string;
@@ -97,12 +96,10 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
   const logMutation = useMutation({
     mutationFn: async (value: any) => {
-      // ENTERPRISE FIX: Use date-fns to safely parse local device time before resolving to UTC string
       const localDate = parse(`${value.log_date} ${value.log_time || '12:00'}`, 'yyyy-MM-dd HH:mm', new Date());
       const combinedTimestamp = localDate.toISOString();
 
       let finalWeightGrams: number | null = null;
-
       if (mode === 'WEIGHT' && !value.weight_not_required) {
         if (animal.weight_unit === 'lb') {
           finalWeightGrams = ((Number(value.lbs || 0) * 16) + Number(value.oz || 0) + (Number(value.eighths || 0) / 8)) * 28.3495;
@@ -118,7 +115,6 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
       if (mode === 'FEEDING') {
         const formattedMeals = value.meals.map((m: MealInput) => {
-          // Process meal times safely via date-fns
           const mealLocalTime = parse(`${value.log_date} ${m.time}`, 'yyyy-MM-dd HH:mm', new Date());
           return {
             time: mealLocalTime.toISOString(),
@@ -137,6 +133,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
           });
         } else {
           return await dailyLogService.commitLog({
+            id: value._optimisticId, // Utilize the ID generated in onMutate
             animal_id: animal.id,
             log_type: 'FEEDING',
             log_date: combinedTimestamp,
@@ -147,13 +144,11 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       }
 
       const updates: any = { notes: value.notes || null, log_date: combinedTimestamp };
-      
       if (mode === 'WEIGHT') {
         updates.weight_grams = finalWeightGrams;
         updates.weight_not_required = value.weight_not_required;
         updates.weight_unit = animal.weight_unit;
       }
-      
       if (mode === 'TEMPERATURE') {
         updates.temperature_c = value.temperature_c === '' ? null : Number(value.temperature_c);
         updates.basking_temp_c = value.basking_temp_c === '' ? null : Number(value.basking_temp_c);
@@ -163,13 +158,54 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       if (initialLogData?.id) {
         return await dailyLogService.updateLogDirect(initialLogData.id, updates);
       } else {
-        return await dailyLogService.commitLog({ animal_id: animal.id, log_type: mode, ...updates });
+        return await dailyLogService.commitLog({ id: value._optimisticId, animal_id: animal.id, log_type: mode, ...updates });
       }
     },
+    
+    // ENTERPRISE FIX: Optimistic UI Updates
+    onMutate: async (variables) => {
+      // 1. Cancel outgoing queries to prevent race conditions
+      await queryClient.cancelQueries({ queryKey: ['daily_logs'] });
+      await queryClient.cancelQueries({ queryKey: ['animal_logs', animal.id] });
+
+      // 2. Snapshot current caches for potential rollback
+      const previousDailyLogs = queryClient.getQueryData(['daily_logs']);
+      const previousAnimalLogs = queryClient.getQueryData(['animal_logs', animal.id]);
+
+      // 3. Generate a temporary UI record
+      const optimisticId = crypto.randomUUID();
+      variables._optimisticId = optimisticId; // Bind this ID so the service layer uses it
+      
+      const localDate = parse(`${variables.log_date} ${variables.log_time || '12:00'}`, 'yyyy-MM-dd HH:mm', new Date());
+      
+      const optimisticRecord = {
+        id: optimisticId,
+        animal_id: animal.id,
+        log_type: mode,
+        log_date: localDate.toISOString(),
+        notes: variables.notes || '',
+        _isOptimistic: true // UI FLAG: We can use this to style pending rows with lower opacity later
+      };
+
+      // 4. Inject into local arrays
+      const injectRecord = (old: any) => Array.isArray(old) ? [optimisticRecord, ...old] : [optimisticRecord];
+      queryClient.setQueryData(['daily_logs'], injectRecord);
+      queryClient.setQueryData(['animal_logs', animal.id], injectRecord);
+
+      return { previousDailyLogs, previousAnimalLogs };
+    },
+    
+    onError: (err: any, variables, context) => {
+      // Rollback on failure
+      if (context?.previousDailyLogs) queryClient.setQueryData(['daily_logs'], context.previousDailyLogs);
+      if (context?.previousAnimalLogs) queryClient.setQueryData(['animal_logs', animal.id], context.previousAnimalLogs);
+      setErrorMsg(err.message || 'Failed to queue log data.');
+    },
+    
     onSettled: () => {
+      // When network restores, invalidate to grab authoritative server state
       queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
       queryClient.invalidateQueries({ queryKey: ['animal_logs', animal.id] });
-      onClose();
     }
   });
 
@@ -185,14 +221,14 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       basking_temp_c: initialLogData?.basking_temp_c || '',
       cool_temp_c: initialLogData?.cool_temp_c || '',
       meals: initialMeals(),
+      _optimisticId: '' // Hidden field for mutation tracking
     },
     onSubmit: async ({ value }) => {
       setErrorMsg(null);
-      try {
-        await logMutation.mutateAsync(value);
-      } catch (err: any) {
-        setErrorMsg(err.message || 'Failed to sync log parameter data.');
-      }
+      // ENTERPRISE FIX: Use fire-and-forget mutate() and close the modal instantly.
+      // This prevents the UI from freezing indefinitely when offline.
+      logMutation.mutate(value);
+      onClose();
     }
   });
 
@@ -374,10 +410,10 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
               <button
                 type="submit"
                 form="quick-log-form"
-                disabled={!canSubmit || isSubmitting || logMutation.isPending}
+                disabled={!canSubmit || isSubmitting}
                 className="flex items-center gap-2 px-5 py-2.5 bg-emerald-600 hover:bg-emerald-50 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-sm"
               >
-                {(isSubmitting || logMutation.isPending) ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
+                {isSubmitting ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
                 {initialLogData ? 'Save Amendments' : 'Commit Worksheet'}
               </button>
             )}

@@ -1,505 +1,364 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { supabase } from '../lib/supabase';
-import { useAuth } from '../lib/auth';
-import { format } from 'date-fns';
-import { 
-  Stethoscope, FileText, UploadCloud, File, Trash2, Loader2, 
-  Search, AlertCircle, Syringe, Calendar, UserCheck, Paperclip, 
-  ChevronRight, Clock
-} from 'lucide-react';
+import { format, parseISO, formatISO } from 'date-fns';
+import { Stethoscope, Plus, X, Search, Save, Loader2, Calendar, FileText, Syringe, Activity, AlertCircle } from 'lucide-react';
 
 // ------------------------------------------------------------------
-// 1. QUERY OPTIONS (The Offline-First Standard)
+// STRICT OFFLINE QUERY OPTIONS & 14-DAY RAM CAP
 // ------------------------------------------------------------------
-const animalsQueryOptions = queryOptions({
-  queryKey: ['clinical_animals_directory'],
+const clinicalRecordsOptions = queryOptions({
+  queryKey: ['clinical_records'],
   queryFn: async () => {
+    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
     const { data, error } = await supabase
-      .from('animals')
-      .select('id, name, species, category, ring_number, microchip_id')
+      .from('clinical_records')
+      .select('*, animals(name, species)')
       .eq('is_deleted', false)
-      .order('name');
+      .gte('record_date', fourteenDaysAgo)
+      .order('record_date', { ascending: false });
     if (error) throw error;
-    return data;
+    return data || [];
   },
-  staleTime: 1000 * 60 * 5,
+  staleTime: 1000 * 60 * 15,
   gcTime: 1000 * 60 * 60 * 24 * 15,
   networkMode: 'offlineFirst',
   meta: { persist: true }
 });
 
-// ------------------------------------------------------------------
-// 2. ROUTE CONFIGURATION (Pre-fetching Loader)
-// ------------------------------------------------------------------
-export const Route = createFileRoute('/clinical/records')({
-  loader: ({ context }) => {
-    // Inject the loader to prevent waterfall spinners on navigation
-    // @ts-ignore - Assuming queryClient is passed via router context in __root.tsx
-    if (context.queryClient) context.queryClient.ensureQueryData(animalsQueryOptions);
+const activeAnimalsOptions = queryOptions({
+  queryKey: ['active_animals'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('animals').select('id, name, species').eq('is_deleted', false).order('name');
+    if (error) throw error;
+    return data || [];
   },
-  component: ClinicalRecordsDashboard,
+  staleTime: 1000 * 60 * 60,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
+});
+
+export const Route = createFileRoute('/clinical/records')({
+  loader: async ({ context: { queryClient } }) => {
+    // @ts-ignore
+    if (queryClient) {
+      // @ts-ignore
+      await Promise.all([ queryClient.ensureQueryData(clinicalRecordsOptions), queryClient.ensureQueryData(activeAnimalsOptions) ]);
+    }
+  },
+  component: ClinicalRecordsPage,
 });
 
 // ------------------------------------------------------------------
-// 3. DASHBOARD COMPONENT
+// MAIN COMPONENT
 // ------------------------------------------------------------------
-export function ClinicalRecordsDashboard() {
+export function ClinicalRecordsPage() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
-
-  const [selectedAnimal, setSelectedAnimal] = useState<string>('');
-  const [searchTerm, setSearchTerm] = useState('');
-  const [activeTab, setActiveTab] = useState<'timeline' | 'new'>('timeline');
-  const [files, setFiles] = useState<File[]>([]); // Files remain in state as they are binary blobs, not text inputs
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
   const scrollParentRef = useRef<HTMLDivElement>(null);
 
-  const { data: animals, isLoading: loadingAnimals } = useQuery(animalsQueryOptions);
+  useEffect(() => {
+    const channel = supabase.channel('clinical-records-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'clinical_records' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['clinical_records'] });
+      }).subscribe();
+    return () => { supabase.removeChannel(channel); };
+  }, [queryClient]);
 
-  const { data: history, isLoading: loadingHistory } = useQuery({
-    queryKey: ['clinical_history', selectedAnimal],
-    queryFn: async () => {
-      if (!selectedAnimal) return [];
-      const { data, error } = await supabase
-        .from('clinical_records')
-        .select(`*, clinical_attachments (*)`)
-        .eq('animal_id', selectedAnimal)
-        .eq('is_deleted', false)
-        .order('record_date', { ascending: false });
+  const { data: records = [], isLoading } = useQuery(clinicalRecordsOptions);
+  const { data: animals = [] } = useQuery(activeAnimalsOptions);
+
+  const filteredRecords = useMemo(() => {
+    if (!searchQuery) return records;
+    const lower = searchQuery.toLowerCase();
+    return records.filter((r: any) => 
+      (r.animals?.name || '').toLowerCase().includes(lower) ||
+      (r.diagnosis || '').toLowerCase().includes(lower) ||
+      (r.treatment || '').toLowerCase().includes(lower)
+    );
+  }, [records, searchQuery]);
+
+  const rowVirtualizer = useWindowVirtualizer({
+    count: filteredRecords.length,
+    estimateSize: () => 140, 
+    overscan: 5,
+  });
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+
+  return (
+    <div className="max-w-7xl mx-auto space-y-6 pb-32">
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+        <div>
+          <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
+            <Stethoscope className="text-teal-600" size={24} /> Veterinary Records
+          </h1>
+          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Clinical Examinations & Treatments</p>
+        </div>
+
+        <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
+          <div className="relative w-full sm:w-64">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+            <input 
+              type="text" 
+              placeholder="Search patient or diagnosis..." 
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold text-slate-900 focus:outline-none focus:border-teal-500/50 focus:ring-2 focus:ring-teal-500/20 transition-all shadow-sm" 
+            />
+          </div>
+          <button 
+            onClick={() => setIsModalOpen(true)}
+            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-2 bg-teal-600 hover:bg-teal-500 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-[0_0_15px_rgba(13,148,136,0.15)]"
+          >
+            <Plus size={16} /> Log Examination
+          </button>
+        </div>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-12rem)] min-h-[500px]">
+        {isLoading && <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/60 backdrop-blur-sm"><Loader2 className="animate-spin text-teal-600 w-8 h-8" /></div>}
+        
+        <div className="grid grid-cols-12 gap-4 px-6 py-4 bg-slate-50 border-b border-slate-200 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-10 min-w-[900px]">
+          <div className="col-span-2">Date</div>
+          <div className="col-span-3">Patient</div>
+          <div className="col-span-4">Diagnosis & Treatment</div>
+          <div className="col-span-3 text-right">Follow-Up & Vet</div>
+        </div>
+
+        <div className="overflow-auto h-[calc(100%-53px)] custom-scrollbar min-w-[900px]">
+          {filteredRecords.length === 0 && !isLoading ? (
+            <div className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No clinical records found.</div>
+          ) : (
+            <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+              {virtualItems.map((virtualRow) => {
+                const record = filteredRecords[virtualRow.index];
+                const dateObj = new Date(record.record_date);
+                const followUpObj = record.follow_up_date ? new Date(record.follow_up_date) : null;
+
+                return (
+                  <div key={record.id} className="absolute top-0 left-0 w-full transition-colors border-b border-slate-100 hover:bg-slate-50/60" style={{ height: `${virtualRow.size}px`, transform: `translateY(${virtualRow.start}px)` }}>
+                    <div className="grid grid-cols-12 gap-4 px-6 py-4 items-center h-full">
+                      <div className="col-span-2">
+                        <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-100 text-[10px] font-black text-slate-600 uppercase tracking-widest">
+                          {format(dateObj, 'dd MMM yyyy')}
+                        </div>
+                      </div>
+                      <div className="col-span-3">
+                        <p className="text-sm font-black text-slate-900 uppercase tracking-tight truncate">{record.animals?.name || 'Unknown Patient'}</p>
+                        <div className="flex gap-2 mt-1">
+                          <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest border bg-slate-100 text-slate-500 border-slate-300 truncate max-w-[120px]">
+                            {record.animals?.species || 'Unknown'}
+                          </span>
+                          <span className={`px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest border ${record.record_type === 'ROUTINE' ? 'bg-blue-50 text-blue-700 border-blue-200' : record.record_type === 'INJURY' ? 'bg-amber-50 text-amber-700 border-amber-200' : record.record_type === 'ILLNESS' ? 'bg-rose-50 text-rose-700 border-rose-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+                            {record.record_type}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="col-span-4 space-y-1">
+                        <p className="text-xs font-bold text-slate-900 line-clamp-1"><Activity size={12} className="inline mr-1 text-slate-400" />{record.diagnosis}</p>
+                        <p className="text-[10px] font-medium text-slate-600 line-clamp-2">{record.treatment}</p>
+                        {record.prescriptions && (
+                          <p className="text-[9px] font-black text-teal-700 uppercase tracking-widest flex items-center gap-1 mt-1"><Syringe size={10} /> {record.prescriptions}</p>
+                        )}
+                      </div>
+                      <div className="col-span-3 flex flex-col items-end gap-1.5">
+                        <p className="text-[10px] font-black text-slate-600 uppercase tracking-widest">Vet: {record.vet_name}</p>
+                        {followUpObj ? (
+                          <span className="inline-flex items-center gap-1.5 px-2 py-1 rounded bg-amber-50 border border-amber-200 text-[9px] font-black text-amber-700 uppercase tracking-widest shadow-sm">
+                            <Calendar size={10} /> Follow Up: {format(followUpObj, 'dd MMM yyyy')}
+                          </span>
+                        ) : (
+                          <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">No Follow-Up</span>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {isModalOpen && <ClinicalRecordModal onClose={() => setIsModalOpen(false)} animals={animals} />}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// TANSTACK FORM MODAL (Temporal Fix & Modal Hang Prevented)
+// ---------------------------------------------------------------------------
+function ClinicalRecordModal({ onClose, animals }: { onClose: () => void, animals: any[] }) {
+  const queryClient = useQueryClient();
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  const saveMutation = useMutation({
+    mutationFn: async (payload: any) => {
+      const { error } = await supabase.from('clinical_records').insert([payload]);
       if (error) throw error;
-      return data;
-    },
-    enabled: !!selectedAnimal,
-    staleTime: 1000 * 60 * 5,
-    gcTime: 1000 * 60 * 60 * 24 * 15,
-    networkMode: 'offlineFirst',
-    meta: { persist: true }
-  });
-
-  // ------------------------------------------------------------------
-  // 4. VIRTUALIZER ENGINE (DOM Protection)
-  // ------------------------------------------------------------------
-  const rowVirtualizer = useVirtualizer({
-    count: history?.length || 0,
-    getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 200, // Estimated pixel height of a single timeline card
-    overscan: 4, // Pre-render 4 items off-screen for smooth scrolling
-  });
-
-  // ------------------------------------------------------------------
-  // 5. TANSTACK FORM ENGINE (CPU Protection)
-  // ------------------------------------------------------------------
-  const submitRecordMutation = useMutation({
-    mutationFn: async (formValues: any) => {
-      if (!user?.id) throw new Error("Authentication error.");
-
-      const recordPayload = {
-        animal_id: selectedAnimal,
-        record_date: new Date().toISOString(),
-        record_type: formValues.recordType, 
-        soap_subjective: formValues.subjective || null,
-        soap_objective: formValues.objective || null,
-        soap_assessment: formValues.assessment || null,
-        soap_plan: formValues.plan || null,
-        vet_name: formValues.vetName || null,
-        created_by: user.id,
-        modified_by: user.id,
-        is_deleted: false
-      };
-
-      const { data: record, error: recordErr } = await supabase
-        .from('clinical_records')
-        .insert([recordPayload])
-        .select('id')
-        .single();
-
-      if (recordErr) throw recordErr;
-
-      // Handle External File Uploads Concurrently
-      if (files.length > 0) {
-        const uploadPromises = files.map(async (file) => {
-          const fileExt = file.name.split('.').pop();
-          const fileName = `${selectedAnimal}/${record.id}/${Date.now()}_${Math.random().toString(36).substring(7)}.${fileExt}`;
-          
-          const { error: uploadErr } = await supabase.storage
-            .from('clinical-documents')
-            .upload(fileName, file, { cacheControl: '3600', upsert: false });
-            if (uploadErr) throw uploadErr;
-
-          const { data: publicUrl } = supabase.storage.from('clinical-documents').getPublicUrl(fileName);
-
-          return {
-            record_id: record.id,
-            file_url: publicUrl.publicUrl,
-            file_name: file.name,
-            file_type: file.type || 'application/octet-stream',
-            uploaded_by: user.id,
-            is_deleted: false
-          };
-        });
-
-        const attachments = await Promise.all(uploadPromises);
-        const { error: attachErr } = await supabase.from('clinical_attachments').insert(attachments);
-        if (attachErr) throw attachErr;
-      }
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['clinical_history', selectedAnimal] });
-      setActiveTab('timeline');
-      setFiles([]);
-      form.reset();
-    }
+      queryClient.invalidateQueries({ queryKey: ['clinical_records'] });
+    },
+    onError: (err: any) => setErrorMsg(err.message || 'Failed to save clinical record.')
   });
 
   const form = useForm({
     defaultValues: {
-      recordType: 'Clinical Assessment',
-      vetName: '',
-      subjective: '',
-      objective: '',
-      assessment: '',
-      plan: ''
+      animal_id: '',
+      record_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
+      record_type: 'ROUTINE',
+      diagnosis: '',
+      treatment: '',
+      prescriptions: '',
+      follow_up_date: '',
+      vet_name: ''
     },
-    onSubmit: async ({ value }) => {
-      await submitRecordMutation.mutateAsync(value);
+    onSubmit: ({ value }) => {
+      setErrorMsg(null);
+      
+      // 1. TEMPORAL FIX: Strict ISO format parsing
+      const parsedRecordDate = formatISO(parseISO(value.record_date));
+      const parsedFollowUp = value.follow_up_date ? formatISO(parseISO(value.follow_up_date)) : null;
+
+      const payload = {
+        id: crypto.randomUUID(), // 2. UUID FIX
+        animal_id: value.animal_id,
+        record_date: parsedRecordDate,
+        record_type: value.record_type,
+        diagnosis: value.diagnosis,
+        treatment: value.treatment,
+        prescriptions: value.prescriptions || null,
+        follow_up_date: parsedFollowUp,
+        vet_name: value.vet_name,
+        is_deleted: false
+      };
+
+      // 3. MODAL HANG FIX: Fire and forget mutate + instant close
+      saveMutation.mutate(payload);
+      onClose();
     }
   });
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) setFiles(prev => [...prev, ...Array.from(e.target.files as FileList)]);
-  };
-
-  const filteredAnimals = animals?.filter((a: any) => 
-    a.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
-    a.species.toLowerCase().includes(searchTerm.toLowerCase())
-  ) || [];
-
-  const activeAnimalDetails = animals?.find((a: any) => a.id === selectedAnimal);
+  const inputClass = "w-full bg-white border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-900 focus:outline-none focus:border-teal-500 focus:ring-2 focus:ring-teal-500/20 transition-all shadow-sm";
+  const labelClass = "text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 block";
 
   return (
-    <div className="max-w-[1600px] mx-auto space-y-6 pb-20 font-sans h-[calc(100vh-6rem)] flex flex-col">
-      
-      {/* Top Header */}
-      <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm shrink-0">
-        <h1 className="text-xl font-black uppercase tracking-tight flex items-center gap-3">
-          <Stethoscope className="text-indigo-600" /> Veterinary Documentation
-        </h1>
-        <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">SOAP Records & External Attachments</p>
-      </div>
-
-      <div className="lg:hidden p-4 bg-amber-50 border border-amber-200 rounded-2xl flex items-start gap-3 shadow-sm shrink-0">
-        <AlertCircle className="text-amber-600 shrink-0 mt-0.5" size={20} />
-        <div>
-          <p className="text-xs font-black uppercase tracking-widest text-amber-800">Mobile Restriction Active</p>
-          <p className="text-xs font-medium text-amber-700 mt-1">Clinical data entry is restricted to desktop workstations.</p>
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-50 flex items-center justify-center p-4 overflow-y-auto custom-scrollbar">
+      <div className="bg-white border border-slate-200 rounded-2xl w-full max-w-2xl flex flex-col shadow-2xl relative my-auto">
+        <div className="bg-slate-50 border-b border-slate-100 p-5 flex justify-between items-center shrink-0">
+          <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight flex items-center gap-2">
+            <Stethoscope size={20} className="text-teal-600" /> Log Clinical Examination
+          </h2>
+          <button type="button" onClick={onClose} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors"><X size={20} /></button>
         </div>
-      </div>
 
-      <div className="flex-1 grid grid-cols-1 lg:grid-cols-4 gap-6 min-h-0">
-        
-        {/* Left Panel: Patient Selector */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col overflow-hidden h-full">
-          <div className="p-4 border-b border-slate-200 bg-slate-50 shrink-0">
-            <div className="relative">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
-              <input
-                type="text"
-                placeholder="Search Patients..."
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full pl-9 pr-4 py-2 bg-white border border-slate-200 rounded-xl text-sm font-medium focus:ring-2 focus:ring-indigo-500/20 outline-none"
-              />
-            </div>
-          </div>
-          
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-2 space-y-1">
-            {loadingAnimals ? (
-              <div className="flex justify-center p-8"><Loader2 className="animate-spin text-indigo-600" /></div>
-            ) : filteredAnimals.map((animal: any) => (
-              <button
-                key={animal.id}
-                onClick={() => { setSelectedAnimal(animal.id); setActiveTab('timeline'); }}
-                className={`w-full text-left p-3 rounded-xl transition-all flex items-center justify-between group ${
-                  selectedAnimal === animal.id 
-                    ? 'bg-indigo-600 text-white shadow-md' 
-                    : 'hover:bg-slate-50 text-slate-900 border border-transparent hover:border-slate-200'
-                }`}
-              >
+        <form id="clinical-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="p-6 space-y-5">
+          {errorMsg && <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl text-rose-700 text-xs font-bold shadow-sm">{errorMsg}</div>}
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 bg-slate-50 p-5 rounded-2xl border border-slate-100">
+            <form.Field name="animal_id">
+              {(field) => (
+                <div className="md:col-span-2">
+                  <label className={labelClass}>Patient (Animal)</label>
+                  <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                    <option value="">-- Select Patient --</option>
+                    {animals.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({a.species})</option>)}
+                  </select>
+                </div>
+              )}
+            </form.Field>
+
+            <form.Field name="record_date">
+              {(field) => (
                 <div>
-                  <h3 className="text-sm font-black truncate">{animal.name}</h3>
-                  <p className={`text-[10px] font-bold uppercase tracking-widest truncate mt-0.5 ${selectedAnimal === animal.id ? 'text-indigo-200' : 'text-slate-500'}`}>
-                    {animal.species}
-                  </p>
+                  <label className={labelClass}>Examination Date & Time</label>
+                  <input type="datetime-local" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
                 </div>
-                <ChevronRight size={16} className={selectedAnimal === animal.id ? 'text-white' : 'text-slate-300 group-hover:text-slate-500'} />
-              </button>
-            ))}
+              )}
+            </form.Field>
+
+            <form.Field name="record_type">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Examination Type</label>
+                  <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
+                    <option value="ROUTINE">Routine Health Check</option>
+                    <option value="ILLNESS">Illness / Disease</option>
+                    <option value="INJURY">Injury</option>
+                    <option value="VACCINATION">Vaccination</option>
+                  </select>
+                </div>
+              )}
+            </form.Field>
           </div>
-        </div>
 
-        {/* Right Panel: Records Matrix */}
-        <div className="lg:col-span-3 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col h-full overflow-hidden">
-          
-          {!selectedAnimal ? (
-            <div className="flex-1 flex flex-col items-center justify-center p-10 text-slate-400">
-               <FileText size={48} className="mb-4 text-slate-200" />
-               <p className="text-sm font-black uppercase tracking-widest">Select a patient to view clinical records</p>
-            </div>
-          ) : (
-            <>
-              {/* Patient Header Block */}
-              <div className="p-6 border-b border-slate-200 bg-slate-900 text-white shrink-0">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-2xl font-black uppercase tracking-tight">{activeAnimalDetails?.name}</h2>
-                    <p className="text-xs font-bold tracking-widest text-slate-400 uppercase mt-1">
-                      {activeAnimalDetails?.species} • {activeAnimalDetails?.category}
-                    </p>
-                  </div>
-                  <div className="hidden lg:flex bg-slate-800 p-1 rounded-xl">
-                    <button 
-                      onClick={() => setActiveTab('timeline')}
-                      className={`px-5 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'timeline' ? 'bg-indigo-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
-                    >
-                      <Clock size={14} /> History
-                    </button>
-                    <button 
-                      onClick={() => setActiveTab('new')}
-                      className={`px-5 py-2 rounded-lg text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 ${activeTab === 'new' ? 'bg-emerald-600 text-white shadow-md' : 'text-slate-400 hover:text-white'}`}
-                    >
-                      <FileText size={14} /> New Record
-                    </button>
-                  </div>
-                </div>
+          <form.Field name="diagnosis">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Clinical Diagnosis / Findings</label>
+                <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. Early stage Bumblefoot (Pododermatitis)" className={inputClass} />
               </div>
+            )}
+          </form.Field>
 
-              {/* ----------------- VIRTUALIZED TIMELINE TAB ----------------- */}
-              {activeTab === 'timeline' && (
-                <div ref={scrollParentRef} className="flex-1 overflow-y-auto custom-scrollbar bg-slate-50 relative">
-                  {loadingHistory ? (
-                     <div className="flex justify-center p-10"><Loader2 className="animate-spin text-indigo-600" /></div>
-                  ) : !history || history.length === 0 ? (
-                     <div className="text-center p-10 text-slate-400 text-xs font-bold uppercase tracking-widest">No clinical records found.</div>
-                  ) : (
-                    <div
-                      style={{
-                        height: `${rowVirtualizer.getTotalSize()}px`,
-                        width: '100%',
-                        position: 'relative',
-                      }}
-                      className="max-w-4xl mx-auto py-6"
-                    >
-                      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                        const record = history[virtualRow.index];
-                        return (
-                          <div
-                            key={virtualRow.key}
-                            style={{
-                              position: 'absolute',
-                              top: 0,
-                              left: 0,
-                              width: '100%',
-                              transform: `translateY(${virtualRow.start}px)`,
-                              paddingBottom: '24px' // Gap between cards
-                            }}
-                          >
-                            <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
-                              <div className="p-4 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                  <div className="w-10 h-10 rounded-xl bg-indigo-100 text-indigo-600 flex items-center justify-center shrink-0">
-                                    <Syringe size={20} />
-                                  </div>
-                                  <div>
-                                    <h4 className="text-sm font-black text-slate-900">{record.record_type}</h4>
-                                    <div className="flex items-center gap-2 text-[10px] font-bold text-slate-500 uppercase tracking-widest mt-1">
-                                      <Calendar size={12} /> {format(new Date(record.record_date), 'dd MMM yyyy • HH:mm')}
-                                      {record.vet_name && <><span className="text-slate-300">|</span> <UserCheck size={12} /> Vet: {record.vet_name}</>}
-                                    </div>
-                                  </div>
-                                </div>
-                              </div>
+          <form.Field name="treatment">
+            {(field) => (
+              <div>
+                <label className={labelClass}>Treatment Administered</label>
+                <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={3} className={`${inputClass} resize-none`} placeholder="Detailed notes on the procedure or treatment..." />
+              </div>
+            )}
+          </form.Field>
 
-                              <div className="p-5 space-y-4">
-                                {record.soap_subjective && (
-                                  <div><h5 className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-1">Subjective</h5><p className="text-sm text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-100 whitespace-pre-wrap">{record.soap_subjective}</p></div>
-                                )}
-                                {record.soap_objective && (
-                                  <div><h5 className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-1">Objective</h5><p className="text-sm text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-100 whitespace-pre-wrap">{record.soap_objective}</p></div>
-                                )}
-                                {record.soap_assessment && (
-                                  <div><h5 className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-1">Assessment</h5><p className="text-sm text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-100 whitespace-pre-wrap">{record.soap_assessment}</p></div>
-                                )}
-                                {record.soap_plan && (
-                                  <div><h5 className="text-[10px] font-black uppercase tracking-widest text-indigo-600 mb-1">Plan</h5><p className="text-sm text-slate-700 leading-relaxed bg-slate-50 p-3 rounded-lg border border-slate-100 whitespace-pre-wrap">{record.soap_plan}</p></div>
-                                )}
-                              </div>
-
-                              {record.clinical_attachments?.length > 0 && (
-                                <div className="px-5 py-4 border-t border-slate-100 bg-slate-50/50 flex flex-wrap gap-3">
-                                  {record.clinical_attachments.map((file: any) => (
-                                    <a key={file.id} href={file.file_url} target="_blank" rel="noopener noreferrer" className="flex items-center gap-2 px-3 py-2 bg-white border border-slate-200 rounded-lg text-xs font-bold text-slate-700 hover:border-indigo-500 hover:text-indigo-600 transition-colors shadow-sm">
-                                      <Paperclip size={14} /> {file.file_name}
-                                    </a>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-5 pt-3">
+            <form.Field name="prescriptions">
+              {(field) => (
+                <div>
+                  <label className={`${labelClass} flex items-center gap-1`}><Syringe size={12}/> Medications / Prescriptions</label>
+                  <input type="text" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="e.g. Meloxicam 0.5mg/kg PO SID x5 days" className={inputClass} />
                 </div>
               )}
+            </form.Field>
 
-              {/* ----------------- TANSTACK FORM TAB (Desktop Only) ----------------- */}
-              {activeTab === 'new' && (
-                <div className="flex-1 overflow-y-auto custom-scrollbar p-6 bg-slate-50">
-                  <form 
-                    onSubmit={(e) => { 
-                      e.preventDefault(); 
-                      e.stopPropagation(); 
-                      form.handleSubmit(); 
-                    }} 
-                    className="hidden lg:block max-w-4xl mx-auto space-y-6"
-                  >
-                    
-                    {submitRecordMutation.isError && (
-                      <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 shadow-sm">
-                        <AlertCircle size={20} className="text-rose-600 shrink-0" />
-                        <div>
-                          <p className="text-xs font-black uppercase tracking-widest text-rose-800">Transmission Failed</p>
-                          <p className="text-sm font-medium text-rose-600 mt-1">{submitRecordMutation.error.message}</p>
-                        </div>
-                      </div>
-                    )}
-
-                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm space-y-5">
-                      <div className="grid grid-cols-2 gap-5">
-                        <form.Field name="recordType">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Record / Encounter Type</label>
-                              <input 
-                                required
-                                value={field.state.value}
-                                onBlur={field.handleBlur}
-                                onChange={(e) => field.handleChange(e.target.value)}
-                                placeholder="e.g. Clinical Assessment, X-Ray, Vet Report..."
-                                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500/20 outline-none"
-                              />
-                            </div>
-                          )}
-                        </form.Field>
-
-                        <form.Field name="vetName">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">External Vet Name (Optional)</label>
-                              <input 
-                                value={field.state.value}
-                                onBlur={field.handleBlur}
-                                onChange={(e) => field.handleChange(e.target.value)}
-                                placeholder="e.g. Dr. Sarah Jenkins"
-                                className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-bold focus:ring-2 focus:ring-indigo-500/20 outline-none"
-                              />
-                            </div>
-                          )}
-                        </form.Field>
-                      </div>
-
-                      <div className="space-y-4">
-                        <form.Field name="subjective">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Subjective (History & Observations)</label>
-                              <textarea value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)} rows={3} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none custom-scrollbar" />
-                            </div>
-                          )}
-                        </form.Field>
-                        <form.Field name="objective">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Objective (Physical Exam Findings)</label>
-                              <textarea value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)} rows={3} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none custom-scrollbar" />
-                            </div>
-                          )}
-                        </form.Field>
-                        <form.Field name="assessment">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Assessment (Diagnosis / Differentials)</label>
-                              <textarea value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)} rows={2} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none custom-scrollbar" />
-                            </div>
-                          )}
-                        </form.Field>
-                        <form.Field name="plan">
-                          {(field) => (
-                            <div>
-                              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Plan (Treatment, Meds, Follow-up)</label>
-                              <textarea value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)} rows={3} className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-indigo-500/20 outline-none resize-none custom-scrollbar" />
-                            </div>
-                          )}
-                        </form.Field>
-                      </div>
-                    </div>
-
-                    <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-                      <div className="flex items-center justify-between mb-4">
-                        <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500">External Documents & Imagery</label>
-                        <button type="button" onClick={() => fileInputRef.current?.click()} className="text-xs font-black text-indigo-600 hover:text-indigo-700 flex items-center gap-1 uppercase tracking-widest">
-                          <UploadCloud size={14} /> Attach Files
-                        </button>
-                        <input type="file" multiple ref={fileInputRef} onChange={handleFileSelect} className="hidden" accept=".pdf,.jpg,.jpeg,.png,.docx" />
-                      </div>
-
-                      {files.length === 0 ? (
-                        <div onClick={() => fileInputRef.current?.click()} className="border-2 border-dashed border-slate-300 rounded-xl p-8 flex flex-col items-center justify-center text-slate-400 hover:bg-slate-50 hover:border-indigo-400 hover:text-indigo-500 transition-colors cursor-pointer">
-                          <UploadCloud size={32} className="mb-2" />
-                          <p className="text-xs font-black uppercase tracking-widest">Click to browse or drag files here</p>
-                        </div>
-                      ) : (
-                        <div className="space-y-2">
-                          {files.map((file, index) => (
-                            <div key={index} className="flex items-center justify-between p-3 bg-slate-50 border border-slate-200 rounded-lg">
-                              <div className="flex items-center gap-3">
-                                <File size={16} className="text-indigo-500" />
-                                <span className="text-sm font-bold text-slate-700">{file.name}</span>
-                                <span className="text-[10px] font-bold text-slate-400">{(file.size / 1024 / 1024).toFixed(2)} MB</span>
-                              </div>
-                              <button type="button" onClick={() => { setFiles(prev => prev.filter((_, i) => i !== index)) }} className="p-1.5 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-md transition-colors">
-                                <Trash2 size={16} />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-
-                    <form.Subscribe
-                      selector={(state) => [state.canSubmit, state.isSubmitting]}
-                      children={([canSubmit, isSubmitting]) => (
-                        <button 
-                          type="submit" 
-                          disabled={!canSubmit || isSubmitting || submitRecordMutation.isPending}
-                          className="w-full p-4 bg-emerald-600 hover:bg-emerald-500 disabled:bg-slate-300 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-[11px] font-black uppercase tracking-widest rounded-xl transition-colors shadow-lg shadow-emerald-500/20 flex justify-center items-center gap-2"
-                        >
-                          {(isSubmitting || submitRecordMutation.isPending) ? <Loader2 size={16} className="animate-spin" /> : <FileText size={16} />}
-                          {(isSubmitting || submitRecordMutation.isPending) ? 'Committing Record to Database...' : 'Finalize & Save Record'}
-                        </button>
-                      )}
-                    />
-                  </form>
+            <form.Field name="vet_name">
+              {(field) => (
+                <div>
+                  <label className={labelClass}>Attending Veterinarian</label>
+                  <input type="text" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} placeholder="Dr. Name" className={inputClass} />
                 </div>
               )}
-            </>
-          )}
+            </form.Field>
+          </div>
+
+          <div className="pt-4 border-t border-slate-100">
+            <form.Field name="follow_up_date">
+              {(field) => (
+                <div className="max-w-xs">
+                  <label className={labelClass}>Schedule Follow-Up (Optional)</label>
+                  <input type="date" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
+                </div>
+              )}
+            </form.Field>
+          </div>
+        </form>
+
+        <div className="p-5 border-t border-slate-100 bg-slate-50 flex justify-end gap-3 shrink-0">
+          <button type="button" onClick={onClose} className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">Cancel</button>
+          <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
+            {([canSubmit, isSubmitting]) => (
+              <button type="submit" form="clinical-form" disabled={!canSubmit || isSubmitting as boolean} className="px-8 py-2.5 bg-teal-600 hover:bg-teal-500 disabled:opacity-50 flex items-center gap-2 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-md">
+                {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Save Record
+              </button>
+            )}
+          </form.Subscribe>
         </div>
-
       </div>
     </div>
   );
