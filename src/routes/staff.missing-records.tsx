@@ -4,17 +4,14 @@ import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/r
 import { useForm } from '@tanstack/react-form';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { AlertOctagon, Search, Loader2, Clock, CheckCircle2, XCircle, UserCircle, Calendar } from 'lucide-react';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, parse, formatISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 
-// ------------------------------------------------------------------
-// 1. STRICT OFFLINE QUERY OPTIONS
-// ------------------------------------------------------------------
 const missingRecordsOptions = queryOptions({
   queryKey: ['missing_timesheets'],
   queryFn: async () => {
-    // Queries timesheets that are marked as having an anomaly or missing punch
+    // Note: No 14-day limit applied here because HR must see all unresolved anomalies regardless of age.
     const { data, error } = await supabase
       .from('timesheets')
       .select('*, users:user_id(name, email, role)')
@@ -33,17 +30,11 @@ const missingRecordsOptions = queryOptions({
 export const Route = createFileRoute('/staff/missing-records')({
   loader: async ({ context: { queryClient } }) => {
     // @ts-ignore
-    if (queryClient) {
-      // @ts-ignore
-      await queryClient.ensureQueryData(missingRecordsOptions);
-    }
+    if (queryClient) await queryClient.ensureQueryData(missingRecordsOptions);
   },
   component: MissingRecordsPage,
 });
 
-// ------------------------------------------------------------------
-// 2. MAIN COMPONENT
-// ------------------------------------------------------------------
 export function MissingRecordsPage() {
   const queryClient = useQueryClient();
   const { profile } = useAuth();
@@ -51,30 +42,14 @@ export function MissingRecordsPage() {
   const scrollParentRef = useRef<HTMLDivElement>(null);
   
   const [searchQuery, setSearchQuery] = useState('');
-  const [resolveModalState, setResolveModalState] = useState<{
-    isOpen: boolean;
-    record: any | null;
-  }>({ isOpen: false, record: null });
+  const [resolveModalState, setResolveModalState] = useState<{ isOpen: boolean; record: any | null; }>({ isOpen: false, record: null });
 
-  // ------------------------------------------------------------------
-  // SUPABASE REALTIME CACHE INVALIDATION
-  // ------------------------------------------------------------------
   useEffect(() => {
-    const channel = supabase
-      .channel('missing-records-changes')
-      .on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'timesheets' },
-        (payload) => {
-          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
-          queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] });
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
+    const channel = supabase.channel('missing-records-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'timesheets' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] });
+      }).subscribe();
+    return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
   const { data: records = [], isLoading } = useQuery(missingRecordsOptions);
@@ -88,13 +63,8 @@ export function MissingRecordsPage() {
     );
   }, [records, searchQuery]);
 
-  // ------------------------------------------------------------------
-  // 3. WINDOW VIRTUALIZER (DOM PROTECTION WITHOUT UI/UX SHIFT)
-  // ------------------------------------------------------------------
   const rowVirtualizer = useWindowVirtualizer({
-    count: filteredRecords.length,
-    estimateSize: () => 80, // Estimated pixel height of a missing record row
-    overscan: 5,
+    count: filteredRecords.length, estimateSize: () => 80, overscan: 5,
   });
 
   const virtualItems = rowVirtualizer.getVirtualItems();
@@ -103,8 +73,6 @@ export function MissingRecordsPage() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-20">
-      
-      {/* Header & Navigation */}
       <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-black uppercase tracking-tight flex items-center gap-3">
@@ -112,22 +80,14 @@ export function MissingRecordsPage() {
           </h1>
           <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Timesheet Discrepancy Auditing</p>
         </div>
-        
         <div className="flex flex-col sm:flex-row items-center gap-4 w-full md:w-auto">
           <div className="relative w-full sm:w-72">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-            <input 
-              type="text" 
-              placeholder="Search staff or anomaly type..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500/50 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm" 
-            />
+            <input type="text" placeholder="Search staff or anomaly type..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500/50 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm" />
           </div>
         </div>
       </div>
 
-      {/* Ledger */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col min-h-[500px]">
         <div className="overflow-x-auto w-full flex-1">
           <table className="w-full text-left">
@@ -167,14 +127,10 @@ export function MissingRecordsPage() {
                             <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Unknown Date</span>
                           )}
                         </td>
-                        
                         <td className="px-6 py-4">
-                          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                            <UserCircle size={14} className="text-slate-400" /> {record.users?.name || 'Unknown'}
-                          </p>
+                          <p className="text-xs font-bold text-slate-900 flex items-center gap-1.5"><UserCircle size={14} className="text-slate-400" /> {record.users?.name || 'Unknown'}</p>
                           <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mt-0.5 pl-5">{record.users?.role}</p>
                         </td>
-
                         <td className="px-6 py-4">
                           <div className="flex flex-col gap-1">
                             <span className="text-xs font-black text-rose-700">{record.anomaly_reason || 'Missing Clock-Out / Unmatched Punch'}</span>
@@ -184,13 +140,9 @@ export function MissingRecordsPage() {
                             </div>
                           </div>
                         </td>
-
                         <td className="px-6 py-4 text-right">
                           {isManager ? (
-                            <button 
-                              onClick={() => setResolveModalState({ isOpen: true, record })}
-                              className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm" 
-                            >
+                            <button onClick={() => setResolveModalState({ isOpen: true, record })} className="inline-flex items-center gap-2 px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-600 hover:text-white border border-rose-200 hover:border-rose-600 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all shadow-sm">
                               Resolve
                             </button>
                           ) : (
@@ -208,72 +160,53 @@ export function MissingRecordsPage() {
         </div>
       </div>
 
-      {resolveModalState.isOpen && resolveModalState.record && (
-        <ResolutionModal 
-          onClose={() => setResolveModalState({ isOpen: false, record: null })} 
-          record={resolveModalState.record} 
-        />
-      )}
+      {resolveModalState.isOpen && resolveModalState.record && <ResolutionModal onClose={() => setResolveModalState({ isOpen: false, record: null })} record={resolveModalState.record} />}
     </div>
   );
 }
 
-// ============================================================================
-// MODAL: HR RESOLUTION (TANSTACK FORM ARCHITECTURE)
-// ============================================================================
 function ResolutionModal({ onClose, record }: { onClose: () => void, record: any }) {
   const queryClient = useQueryClient();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const resolveMutation = useMutation({
     mutationFn: async (payload: any) => {
-      const { data, error } = await supabase
-        .from('timesheets')
-        .update({
-          clock_in_time: payload.clock_in_time,
-          clock_out_time: payload.clock_out_time,
-          status: 'COMPLETED', // Clears the anomaly
-          hr_resolution_notes: payload.notes
-        })
-        .eq('id', record.id);
-        
+      const { data, error } = await supabase.from('timesheets').update({
+        clock_in_time: payload.clock_in_time,
+        clock_out_time: payload.clock_out_time,
+        status: 'COMPLETED',
+        hr_resolution_notes: payload.notes
+      }).eq('id', record.id);
       if (error) throw error;
       return data;
     },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] });
-      onClose();
-    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['missing_timesheets'] }),
     onError: (err: any) => setErrorMsg(err.message || 'Failed to resolve record.')
   });
 
-  // Extract date portion if available
   const baseDate = record.shift_date || new Date().toISOString().split('T')[0];
-  
-  const getInitialTime = (timeStr: string | null) => {
-    if (!timeStr) return '';
-    try { return format(parseISO(timeStr), 'HH:mm'); } catch { return ''; }
-  };
+  const getInitialTime = (timeStr: string | null) => timeStr ? format(parseISO(timeStr), 'HH:mm') : '';
 
   const form = useForm({
-    defaultValues: {
-      clock_in: getInitialTime(record.clock_in_time),
-      clock_out: getInitialTime(record.clock_out_time),
-      notes: ''
-    },
-    onSubmit: async ({ value }) => {
+    defaultValues: { clock_in: getInitialTime(record.clock_in_time), clock_out: getInitialTime(record.clock_out_time), notes: '' },
+    onSubmit: ({ value }) => {
       setErrorMsg(null);
-      
       if (!value.clock_in || !value.clock_out) {
         setErrorMsg('Both Clock In and Clock Out times are required for resolution.');
         return;
       }
 
-      await resolveMutation.mutateAsync({
-        clock_in_time: `${baseDate}T${value.clock_in}:00Z`,
-        clock_out_time: `${baseDate}T${value.clock_out}:00Z`,
+      // ENTERPRISE FIX: Strict ISO format parsing merging local date and time inputs safely
+      const clockInDate = parse(`${baseDate} ${value.clock_in}`, 'yyyy-MM-dd HH:mm', new Date());
+      const clockOutDate = parse(`${baseDate} ${value.clock_out}`, 'yyyy-MM-dd HH:mm', new Date());
+
+      // MODAL HANG FIX: Fire and forget
+      resolveMutation.mutate({
+        clock_in_time: formatISO(clockInDate),
+        clock_out_time: formatISO(clockOutDate),
         notes: value.notes
       });
+      onClose();
     }
   });
 
@@ -298,39 +231,18 @@ function ResolutionModal({ onClose, record }: { onClose: () => void, record: any
           {errorMsg && <div className="p-3 bg-rose-50 text-rose-700 text-xs font-bold rounded-xl border border-rose-200">{errorMsg}</div>}
 
           <div className="grid grid-cols-2 gap-4">
-            <form.Field name="clock_in">
-              {(field) => (
-                <div>
-                  <label className={labelClass}>Confirmed Clock In</label>
-                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
-                </div>
-              )}
-            </form.Field>
-            <form.Field name="clock_out">
-              {(field) => (
-                <div>
-                  <label className={labelClass}>Confirmed Clock Out</label>
-                  <input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} />
-                </div>
-              )}
-            </form.Field>
+            <form.Field name="clock_in" children={(field) => (<div><label className={labelClass}>Confirmed Clock In</label><input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} /></div>)} />
+            <form.Field name="clock_out" children={(field) => (<div><label className={labelClass}>Confirmed Clock Out</label><input type="time" required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} /></div>)} />
           </div>
 
-          <form.Field name="notes">
-            {(field) => (
-              <div>
-                <label className={labelClass}>HR Audit Notes</label>
-                <textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Reason for manual override..." />
-              </div>
-            )}
-          </form.Field>
+          <form.Field name="notes" children={(field) => (<div><label className={labelClass}>HR Audit Notes</label><textarea required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} rows={2} className={`${inputClass} resize-none`} placeholder="Reason for manual override..." /></div>)} />
 
           <div className="pt-4 flex justify-end gap-3 border-t border-slate-100">
             <button type="button" onClick={onClose} className="px-5 py-2 text-xs font-bold text-slate-500 uppercase tracking-widest hover:bg-slate-100 rounded-xl">Cancel</button>
             <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
               {([canSubmit, isSubmitting]) => (
-                <button type="submit" disabled={!canSubmit || isSubmitting as boolean || resolveMutation.isPending} className="px-6 py-2 bg-rose-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
-                  {(isSubmitting || resolveMutation.isPending) && <Loader2 size={14} className="animate-spin"/>} Commit Resolution
+                <button type="submit" disabled={!canSubmit || isSubmitting as boolean} className="px-6 py-2 bg-rose-600 text-white text-xs font-black uppercase tracking-widest rounded-xl hover:bg-rose-500 disabled:opacity-50 shadow-sm flex items-center gap-2">
+                  {isSubmitting && <Loader2 size={14} className="animate-spin"/>} Commit Resolution
                 </button>
               )}
             </form.Subscribe>
