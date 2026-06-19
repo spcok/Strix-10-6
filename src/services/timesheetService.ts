@@ -42,7 +42,12 @@ export const timesheetService = {
     return data;
   },
 
-  async clockIn(payload: { shift_date: string; clock_in_time: string }) {
+  async clockIn(payload: { id?: string; shift_date: string; clock_in_time: string }) {
+    // ENTERPRISE FIX: Lock UUID for offline retries
+    if (!payload.id) {
+      payload.id = crypto.randomUUID();
+    }
+
     const { data, error } = await supabase
       .from('timesheets')
       .insert([{

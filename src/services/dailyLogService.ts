@@ -15,6 +15,11 @@ export const dailyLogService = {
   },
 
   async commitLog(payload: Partial<DailyLog>) {
+ 
+    if (!payload.id) {
+      payload.id = crypto.randomUUID();
+    }
+
     const { data, error } = await supabase
       .from('daily_logs')
       .insert([payload])

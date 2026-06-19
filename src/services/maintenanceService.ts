@@ -24,6 +24,11 @@ export const maintenanceService = {
   },
 
   async saveTicket(payload: any) {
+    // ENTERPRISE FIX: Lock UUID for offline retries
+    if (!payload.id) {
+      payload.id = crypto.randomUUID();
+    }
+
     const { data, error } = await supabase
       .from('maintenance_tickets')
       .insert([{

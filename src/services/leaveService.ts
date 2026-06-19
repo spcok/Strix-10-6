@@ -1,7 +1,6 @@
 import { supabase } from '../lib/supabase';
 
 export const leaveService = {
-  // For Staff: See only their own history
   async getMyRequests(userId: string) {
     const { data, error } = await supabase
       .from('leave_requests')
@@ -13,7 +12,6 @@ export const leaveService = {
     return data;
   },
 
-  // For Managers: See all pending queue + approved history
   async getAllRequests() {
     const { data, error } = await supabase
       .from('leave_requests')
@@ -27,8 +25,12 @@ export const leaveService = {
     return data;
   },
 
-  // Staff submits a request (defaults to PENDING)
   async submitRequest(payload: any) {
+    // ENTERPRISE FIX: Lock UUID for offline retries
+    if (!payload.id) {
+      payload.id = crypto.randomUUID();
+    }
+
     const { data, error } = await supabase
       .from('leave_requests')
       .insert([{ ...payload, status: 'PENDING', is_deleted: false }])
@@ -38,7 +40,6 @@ export const leaveService = {
     return data;
   },
 
-  // Manager approves or rejects
   async updateStatus(id: string, status: 'APPROVED' | 'REJECTED', approvedBy: string) {
     const { error } = await supabase
       .from('leave_requests')
@@ -48,7 +49,6 @@ export const leaveService = {
     return true;
   },
 
-  // Cancel/Delete request
   async deleteRequest(id: string) {
     const { error } = await supabase
       .from('leave_requests')

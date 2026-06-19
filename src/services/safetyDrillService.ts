@@ -23,7 +23,6 @@ export const safetyDrillService = {
   },
 
   async getActiveTimesheets() {
-    // Architectural Fix: Corrected to clock_out_time based on v3 schema
     const { data, error } = await supabase
       .from('timesheets')
       .select('user_id')
@@ -35,6 +34,11 @@ export const safetyDrillService = {
   },
 
   async saveDrill(payload: any) {
+    // ENTERPRISE FIX: Lock UUID for offline retries
+    if (!payload.id) {
+      payload.id = crypto.randomUUID();
+    }
+
     const { data, error } = await supabase
       .from('safety_drills')
       .insert([{

@@ -1,7 +1,7 @@
 import React from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { Menu, UserCircle, PlayCircle, StopCircle, Loader2 } from 'lucide-react';
-import { format } from 'date-fns';
+import { format, formatISO } from 'date-fns';
 import { useAuth } from '../../lib/auth';
 import { timesheetService } from '../../services/timesheetService';
 
@@ -24,7 +24,8 @@ export function Header({ onMenuClick }: HeaderProps) {
       const now = new Date();
       await timesheetService.clockIn({
         shift_date: format(now, 'yyyy-MM-dd'),
-        clock_in_time: now.toISOString()
+        // ENTERPRISE FIX: Use date-fns formatISO to capture precise local timezone offset
+        clock_in_time: formatISO(now) 
       });
     },
     onSuccess: () => {
@@ -36,7 +37,8 @@ export function Header({ onMenuClick }: HeaderProps) {
 
   const clockOutMutation = useMutation({
     mutationFn: async (id: string) => {
-      await timesheetService.clockOut(id, new Date().toISOString());
+      // ENTERPRISE FIX: Strict local formatting
+      await timesheetService.clockOut(id, formatISO(new Date()));
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['my_active_shift'] });
@@ -86,7 +88,7 @@ export function Header({ onMenuClick }: HeaderProps) {
         <div className="flex items-center gap-3 pl-4 border-l border-slate-200">
           <div className="hidden md:block text-right">
             <p className="text-xs font-black text-slate-900 uppercase tracking-tight">{profile?.name || 'Loading...'}</p>
-            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{profile?.role || 'Staff'}</p>
+            <p className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{profile?.role?.replace('_', ' ') || 'Staff'}</p>
           </div>
           <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500 overflow-hidden">
             <UserCircle size={32} strokeWidth={1} />

@@ -12,30 +12,31 @@ export const incidentService = {
     return data;
   },
 
-  // Upgraded to handle offline-safe compound inserts
   async commitIncident(incidentPayload: any, firstAidPayload?: any) {
     const promises = [];
     
-    // Generate the primary incident UUID locally
-    const incidentId = crypto.randomUUID();
+    // ENTERPRISE FIX: Mutate payload reference so offline retries use the exact same UUID
+    if (!incidentPayload.id) {
+      incidentPayload.id = crypto.randomUUID();
+    }
+    const incidentId = incidentPayload.id;
 
     promises.push(
       supabase.from('incidents').insert([{
         ...incidentPayload,
-        id: incidentId,
         is_deleted: false,
         status: incidentPayload.status || 'OPEN'
       }])
     );
 
-    // If the incident included a medical event, link it and fire concurrently
     if (firstAidPayload) {
-      const firstAidId = crypto.randomUUID();
+      if (!firstAidPayload.id) {
+        firstAidPayload.id = crypto.randomUUID();
+      }
       promises.push(
         supabase.from('first_aid_logs').insert([{
           ...firstAidPayload,
-          id: firstAidId,
-          incident_id: incidentId,
+          incident_id: incidentId, // Perfect relational mapping retained offline
           is_deleted: false
         }])
       );

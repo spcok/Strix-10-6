@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect } from 'react';
 import Cropper from 'react-easy-crop';
-import { X, Check, Image as ImageIcon } from 'lucide-react';
+import { X, Check, Image as ImageIcon, WifiOff } from 'lucide-react';
 
 interface ImageUploaderProps {
   value: string | Blob | null;
@@ -15,7 +15,7 @@ export function ImageUploader({
   onChange, 
   requireCrop = false, 
   defaultAspect = 4/3, 
-  allowToggle = false 
+  allowToggle = true // ENTERPRISE FIX: Default to true for map distribution flexibility
 }: ImageUploaderProps) {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [crop, setCrop] = useState({ x: 0, y: 0 });
@@ -23,6 +23,22 @@ export function ImageUploader({
   const [currentAspect, setCurrentAspect] = useState(defaultAspect);
   const [croppedAreaPixels, setCroppedAreaPixels] = useState(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  
+  // ENTERPRISE FIX: Offline Deadlock Gatekeeper
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
 
   useEffect(() => {
     if (!value) {
@@ -156,7 +172,22 @@ export function ImageUploader({
     );
   }
 
-  // 3. Render File Picker
+  // 3. Render Offline Deadlock State
+  if (!isOnline) {
+    return (
+      <div className="w-full relative max-w-sm">
+        <div className="w-full p-8 border-2 border-dashed border-slate-300 rounded-xl bg-slate-100 flex flex-col items-center justify-center gap-3 text-slate-400 cursor-not-allowed">
+          <WifiOff size={28} className="text-slate-300" />
+          <div className="text-center">
+            <span className="block text-xs font-black uppercase tracking-widest text-slate-500">Uploads Disabled</span>
+            <span className="block text-[10px] font-bold uppercase tracking-widest text-slate-400 mt-1">Attachments Require Active Wi-Fi</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // 4. Render Active File Picker
   return (
     <div className="w-full relative max-w-sm">
       <input

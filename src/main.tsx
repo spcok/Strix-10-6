@@ -7,10 +7,11 @@ import { createAsyncStoragePersister } from '@tanstack/query-async-storage-persi
 import { get, set, del } from 'idb-keyval';
 import { AlertTriangle } from 'lucide-react';
 import { routeTree } from './routeTree.gen';
+import { supabase } from './lib/supabase';
 import './index.css';
 
 // ------------------------------------------------------------------
-// 1. CORE ENGINE UPGRADE (Strict Offline-First)
+// 1. CORE ENGINE UPGRADE (Strict Offline-First & 401 Interception)
 // ------------------------------------------------------------------
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -23,7 +24,24 @@ const queryClient = new QueryClient({
     },
     mutations: {
       networkMode: 'offlineFirst',
-      retry: 3,
+      // ENTERPRISE FIX: Intercept 401 Auth errors to prevent queue deletion
+      retry: async (failureCount, error: any) => {
+        const isAuthError = error?.status === 401 || error?.code === 'PGRST301' || error?.message?.includes('JWT');
+        
+        if (isAuthError) {
+          console.warn('[Sync Engine] Auth token expired during offline sync. Attempting GoTrue refresh...');
+          const { data } = await supabase.auth.refreshSession();
+          
+          if (data?.session) {
+            console.log('[Sync Engine] Session securely restored. Forcing mutation retry.');
+            return true; // Force TanStack to retry the payload with the new token
+          }
+        }
+        
+        // Default behavior: retry standard network errors up to 3 times
+        return failureCount < 3;
+      },
+      retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
     }
   },
 });
@@ -45,16 +63,15 @@ const persister = createAsyncStoragePersister({
 });
 
 // ------------------------------------------------------------------
-// 3. EXPLICIT CACHE DEHYDRATION (The Enterprise Fix)
+// 3. EXPLICIT CACHE DEHYDRATION
 // ------------------------------------------------------------------
 persistQueryClient({
   queryClient,
   persister,
   maxAge: 1000 * 60 * 60 * 24 * 14,
-  buster: 'v1.0.4', // Bumped to clear previous un-persisted mutation states
+  buster: 'v1.0.5',
   dehydrateOptions: {
     shouldDehydrateQuery: (query) => query.state.status === 'success',
-    // COMMAND: Physically save the offline POST/PATCH queue to IndexedDB
     shouldDehydrateMutation: (mutation) => mutation.state.isPaused, 
   },
 });
