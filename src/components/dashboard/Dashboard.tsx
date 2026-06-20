@@ -14,12 +14,13 @@ import {
 import { 
   Search, Plus, Drumstick, ArrowUpDown, Loader2, 
   Scale, Calendar, CheckCircle2, ThermometerSun, AlertCircle, 
-  ClipboardList, Activity, ChevronRight, ChevronDown, Users, User
+  ClipboardList, Activity, ChevronRight, ChevronDown, Users, User, MapPin
 } from 'lucide-react';
 import { Animal } from '../../types';
 import { supabase } from '../../lib/supabase';
 import AnimalFormModal from '../animals/AnimalFormModal';
 import { AnimalProfile } from '../animals/AnimalProfile';
+import { MobProfile } from '../animals/MobProfile';
 
 const columnHelper = createColumnHelper<Animal>();
 const EXOTIC_CATEGORIES = ['EXOTIC'];
@@ -70,18 +71,15 @@ export default function Dashboard() {
     };
   }, [queryClient]);
 
-  // TREE CONSTRUCTION ENGINE (Archive Segregation logic)
+  // TREE CONSTRUCTION ENGINE
   const hierarchicalData = useMemo(() => {
     let baseData = allAnimals;
 
     if (activeTab === 'ARCHIVED') {
-      // ONLY show archived records
       baseData = allAnimals.filter(a => a.status === 'ARCHIVED');
     } else if (activeTab === 'ALL') {
-      // Show everything EXCEPT archived records
       baseData = allAnimals.filter(a => a.status !== 'ARCHIVED');
     } else {
-      // Filter by Category AND ensure it is not archived
       baseData = allAnimals.filter(a => a.category === activeTab && a.status !== 'ARCHIVED');
     }
 
@@ -106,64 +104,77 @@ export default function Dashboard() {
   const weighedToday = 0; 
   const fedToday = 0; 
 
+  // COLUMN DEFINITIONS MATRIX
   const columns = useMemo(() => {
-    const baseColumns = [
-      columnHelper.accessor('name', {
-        header: 'Entity Details',
-        cell: info => {
-          const isGroup = info.row.original.record_type === 'GROUP';
-          const canExpand = info.row.getCanExpand();
-          
-          return (
-            <div 
-              className="flex items-center gap-3" 
-              style={{ paddingLeft: `${info.row.depth * 1.5}rem` }}
-            >
-              <div className="flex items-center justify-center w-5">
-                {canExpand ? (
-                  <button 
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      info.row.toggleExpanded();
-                    }} 
-                    className="cursor-pointer text-slate-400 hover:text-slate-900 transition-colors p-1 rounded hover:bg-slate-200"
-                  >
-                    {info.row.getIsExpanded() ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
-                  </button>
-                ) : null}
-              </div>
-              
-              <div className={`p-1.5 rounded-lg shrink-0 ${isGroup ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
+    // 1. Shared Name Column (With Image)
+    const nameColumn = columnHelper.accessor('name', {
+      header: 'Name',
+      cell: info => {
+        const isGroup = info.row.original.record_type === 'GROUP';
+        const canExpand = info.row.getCanExpand();
+        const avatarUrl = (info.row.original as any).avatar_url;
+        
+        return (
+          <div className="flex items-center gap-3" style={{ paddingLeft: `${info.row.depth * 1.5}rem` }}>
+            <div className="flex items-center justify-center w-5">
+              {canExpand ? (
+                <button onClick={(e) => { e.stopPropagation(); info.row.toggleExpanded(); }} className="cursor-pointer text-slate-400 hover:text-slate-900 transition-colors p-1 rounded hover:bg-slate-200">
+                  {info.row.getIsExpanded() ? <ChevronDown size={16} /> : <ChevronRight size={16} />}
+                </button>
+              ) : null}
+            </div>
+            
+            {avatarUrl ? (
+              <img src={avatarUrl} alt={info.getValue()} className="w-8 h-8 rounded-full object-cover shrink-0 border border-slate-200 shadow-sm" />
+            ) : (
+              <div className={`p-2 rounded-full shrink-0 shadow-sm ${isGroup ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
                 {isGroup ? <Users size={14} /> : <User size={14} />}
               </div>
-              
-              <div className="flex flex-col items-start">
-                <button 
-                  onClick={() => setSelectedAnimalId(info.row.original.id)}
-                  className="font-bold text-slate-900 text-sm leading-tight hover:text-emerald-600 hover:underline text-left transition-colors"
-                >
-                  {info.getValue() || (isGroup ? 'Unnamed Group' : 'Unnamed Animal')}
-                </button>
-                <span className="text-xs text-slate-500 font-medium">{info.row.original.species || 'Unknown Species'}</span>
-              </div>
-            </div>
-          );
-        },
-      }),
-    ];
+            )}
+            
+            <button onClick={() => setSelectedAnimalId(info.row.original.id)} className="font-bold text-slate-900 text-sm leading-tight hover:text-emerald-600 hover:underline text-left transition-colors">
+              {info.getValue() || (isGroup ? 'Unnamed Group' : 'Unnamed Animal')}
+            </button>
+          </div>
+        );
+      },
+    });
 
+    // 2. Shared Latin Name Column
+    const latinNameColumn = columnHelper.accessor('species', {
+      header: 'Latin Name',
+      cell: info => <span className="text-xs font-medium text-slate-500 italic">{(info.row.original as any).scientific_name || info.getValue() || 'Unknown'}</span>
+    });
+
+    // 3. Shared Location Column
+    const locationColumn = columnHelper.display({
+      id: 'location',
+      header: 'Location',
+      cell: info => (
+        <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest flex items-center gap-1.5 bg-slate-100 px-2 py-1 rounded w-fit border border-slate-200">
+          <MapPin size={10} className="text-slate-400" />
+          {(info.row.original as any).location || 'Unknown Enclosure'}
+        </span>
+      )
+    });
+
+    // =========================================================
+    // EXOTIC LAYOUT
+    // =========================================================
     if (EXOTIC_CATEGORIES.includes(activeTab)) {
       return [
-        ...baseColumns,
+        nameColumn,
+        latinNameColumn,
         columnHelper.accessor('flying_weight', {
           header: 'Weight',
           cell: info => {
             const weight = info.getValue();
+            const unit = (info.row.original as any).weight_unit || 'g';
             if (!weight && info.row.original.record_type === 'GROUP') return <span className="text-[10px] text-slate-400 font-medium">N/A (Group)</span>;
             return (
               <span className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
                 <Scale size={12} className="text-slate-400" />
-                {weight ? `${weight}g` : '--'}
+                {weight ? `${weight}${unit}` : '--'}
               </span>
             );
           },
@@ -171,13 +182,13 @@ export default function Dashboard() {
         columnHelper.display({
           id: 'last_feed',
           header: 'Last Feed',
-          cell: () => <span className="text-[10px] text-slate-400 italic font-medium uppercase tracking-widest">Pending Logs</span>,
+          cell: () => <span className="text-[10px] text-slate-400 italic font-medium uppercase tracking-widest">Pending Sync</span>,
         }),
         columnHelper.accessor('next_feed_date', {
           header: 'Next Feed',
           cell: info => {
             const date = info.getValue();
-            if (!date) return <span className="text-slate-400">-</span>;
+            if (!date) return <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Unscheduled</span>;
             return (
               <span className="font-bold text-slate-800 text-xs uppercase tracking-tight flex items-center gap-1.5">
                 <Drumstick size={12} className="text-amber-500" />
@@ -187,17 +198,17 @@ export default function Dashboard() {
           },
         }),
         columnHelper.accessor('target_day_temp_c', {
-          header: 'Temperature',
+          header: 'Today\'s Temperature',
           cell: info => {
             const day = info.getValue();
             const night = info.row.original.target_night_temp_c;
             const ambient = info.row.original.ambient_temp_only;
-            if (!day && !night) return <span className="text-slate-400">--</span>;
+            if (!day && !night) return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">--</span>;
             return (
               <div className="flex flex-col gap-0.5">
                 <span className="text-xs font-bold text-orange-600 flex items-center gap-1">
                   <ThermometerSun size={12} />
-                  {ambient ? 'Ambient:' : 'Basking:'} {day}°C
+                  {ambient ? 'Amb:' : 'Bask:'} {day}°C
                 </span>
                 {!ambient && night && (
                   <span className="text-[10px] text-blue-600 font-bold tracking-wide uppercase">
@@ -208,80 +219,45 @@ export default function Dashboard() {
             );
           },
         }),
+        locationColumn
       ];
     }
 
+    // =========================================================
+    // OWL / RAPTOR / MAMMAL LAYOUT
+    // =========================================================
     return [
-      ...baseColumns,
+      nameColumn,
+      latinNameColumn,
       columnHelper.accessor('flying_weight', {
-        header: 'Weight Matrix',
+        header: 'Today\'s Weight',
         cell: info => {
           const weight = info.getValue();
-          const target = info.row.original.average_target_weight;
+          const unit = (info.row.original as any).weight_unit || 'g';
           
-          if (!weight && !target && info.row.original.record_type === 'GROUP') {
-            return <span className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">N/A (Group Level)</span>;
+          if (!weight && info.row.original.record_type === 'GROUP') {
+            return <span className="text-[10px] text-slate-400 font-medium uppercase tracking-widest">N/A (Group)</span>;
           }
 
           return (
-            <div className="flex flex-col gap-0.5">
-              <span className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
-                <Scale size={12} className="text-slate-400" />
-                {weight ? `${weight}g` : '--'}
-              </span>
-              {target && <span className="text-[10px] text-slate-400 font-bold tracking-wide uppercase">Target: {target}g</span>}
-            </div>
+            <span className="text-sm font-bold text-slate-700 flex items-center gap-1.5">
+              <Scale size={12} className="text-slate-400" />
+              {weight ? `${weight}${unit}` : '--'}
+            </span>
           );
         },
       }),
-      columnHelper.accessor('status', {
-        header: 'Status & ID',
-        cell: info => {
-          const status = info.getValue();
-          
-          let colorClass = 'bg-slate-100 text-slate-600 border-slate-200';
-          let displayLabel = status || 'UNKNOWN';
-
-          if (status === 'ON_DISPLAY') { colorClass = 'bg-emerald-50 text-emerald-700 border-emerald-200'; displayLabel = 'ON DISPLAY'; }
-          else if (status === 'MEDICAL') { colorClass = 'bg-rose-50 text-rose-700 border-rose-200'; displayLabel = 'MEDICAL'; }
-          else if (status === 'QUARANTINE') { colorClass = 'bg-amber-50 text-amber-700 border-amber-200'; displayLabel = 'QUARANTINE'; }
-          else if (status === 'OFF_DISPLAY') { colorClass = 'bg-slate-100 text-slate-600 border-slate-300'; displayLabel = 'OFF DISPLAY'; }
-          else if (status === 'OFFSITE') { colorClass = 'bg-blue-50 text-blue-700 border-blue-200'; displayLabel = 'OFFSITE'; }
-          else if (status === 'ARCHIVED') { colorClass = 'bg-slate-800 text-slate-300 border-slate-600'; displayLabel = 'ARCHIVED'; }
-          
-          return (
-            <div className="flex flex-col items-start gap-1">
-              <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[9px] font-black uppercase tracking-widest border ${colorClass}`}>
-                {displayLabel}
-              </span>
-              {info.row.original.record_type === 'INDIVIDUAL' && (
-                <span className="text-[10px] text-slate-400 font-bold uppercase tracking-wider mt-0.5">
-                  {info.row.original.ring_number || info.row.original.microchip_id || 'NO ID'}
-                </span>
-              )}
-            </div>
-          );
-        },
+      columnHelper.display({
+        id: 'todays_feed',
+        header: 'Today\'s Feed',
+        cell: () => <span className="text-[10px] text-slate-400 italic font-medium uppercase tracking-widest">Pending Sync</span>
       }),
-      columnHelper.accessor('next_feed_date', {
-        header: 'Next Feed',
-        cell: info => {
-          const date = info.getValue();
-          if (!date) return <span className="text-slate-400">-</span>;
-          
-          return (
-            <div className="flex flex-col gap-0.5">
-              <span className="font-bold text-slate-800 text-xs uppercase tracking-tight flex items-center gap-1.5">
-                <Drumstick size={12} className="text-amber-500" />
-                {new Date(date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })}
-              </span>
-              <span className="text-[9px] font-black uppercase tracking-widest text-slate-400 leading-tight">
-                {info.row.original.next_feed_note ?? 'Scheduled'}
-              </span>
-            </div>
-          );
-        },
+      columnHelper.display({
+        id: 'last_feed',
+        header: 'Last Feed',
+        cell: () => <span className="text-[10px] text-slate-400 italic font-medium uppercase tracking-widest">Pending Sync</span>
       }),
+      locationColumn
     ];
   }, [activeTab]);
 
@@ -480,11 +456,19 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* CONDITIONAL PROFILE ROUTING */}
       {selectedAnimal && (
-        <AnimalProfile 
-          animal={selectedAnimal} 
-          onClose={() => setSelectedAnimalId(null)} 
-        />
+        selectedAnimal.record_type === 'GROUP' ? (
+          <MobProfile 
+            mob={selectedAnimal} 
+            onClose={() => setSelectedAnimalId(null)} 
+          />
+        ) : (
+          <AnimalProfile 
+            animal={selectedAnimal} 
+            onClose={() => setSelectedAnimalId(null)} 
+          />
+        )
       )}
 
       {isCreateAnimalModalOpen && (

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useSyncExternalStore } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQueryClient } from '@tanstack/react-query';
 import { Activity, HardDrive, Wifi, WifiOff, CloudUpload, ShieldCheck, Cpu } from 'lucide-react';
@@ -10,21 +10,24 @@ export const Route = createFileRoute('/settings/health')({
 export function SystemHealthPage() {
   const queryClient = useQueryClient();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
-  const [pausedMutations, setPausedMutations] = useState(0);
   const [storageData, setStorageData] = useState<{ usage: string, quota: string, percent: number }>({ usage: '0 MB', quota: '0 MB', percent: 0 });
+
+  // ------------------------------------------------------------------
+  // REACT 19 ARCHITECTURE: Native External Store Subscription
+  // Safely watches the TanStack cache without triggering render collisions
+  // ------------------------------------------------------------------
+  const pausedMutations = useSyncExternalStore(
+    // 1. The Subscriber: Tells React when to update
+    (onStoreChange) => queryClient.getMutationCache().subscribe(onStoreChange),
+    // 2. The Snapshot: Tells React what data to extract
+    () => queryClient.getMutationCache().getAll().filter(m => m.state.isPaused).length
+  );
 
   useEffect(() => {
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
-
-    // Track TanStack Queue
-    const updatePausedCount = () => {
-      setPausedMutations(queryClient.getMutationCache().getAll().filter(m => m.state.isPaused).length);
-    };
-    updatePausedCount();
-    const unsubscribe = queryClient.getMutationCache().subscribe(updatePausedCount);
 
     // Track IndexedDB/Browser Quota safely
     const fetchStorage = async () => {
@@ -48,11 +51,10 @@ export function SystemHealthPage() {
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
-      unsubscribe();
     };
-  }, [queryClient]);
+  }, []);
 
-  // Determine App Mode based on the bypass logic we put in main.tsx
+  // Determine App Mode based on the bypass logic
   const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   return (

@@ -1,31 +1,50 @@
 import { supabase } from '../lib/supabase';
-import { DailyLog } from '../types';
 
 export const dailyLogService = {
-  async getLogsByAnimal(animalId: string): Promise<DailyLog[]> {
-    // ENTERPRISE FIX: 14-Day Rolling Window to prevent Offline RAM Exhaustion
-    const fourteenDaysAgo = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
-
-    const { data, error } = await supabase
+  // ------------------------------------------------------------------
+  // CASCADING READ: Fetches logs for the individual AND its parent mob
+  // ------------------------------------------------------------------
+  async getCascadedLogs(animalId: string, parentGroupId?: string | null) {
+    let query = supabase
       .from('daily_logs')
-      .select('*')
-      .eq('animal_id', animalId)
+      .select('*, animals(name, species, record_type)')
       .eq('is_deleted', false)
-      .gte('log_date', fourteenDaysAgo) // Strict cutoff
       .order('log_date', { ascending: false });
 
-    if (error) throw error;
-    return data as DailyLog[];
-  },
-
-  async commitLog(payload: Partial<DailyLog>) {
-    if (!payload.id) {
-      payload.id = crypto.randomUUID();
+    // If the animal belongs to a group, pull logs attached to both UUIDs
+    if (parentGroupId) {
+      query = query.or(`animal_id.eq.${animalId},animal_id.eq.${parentGroupId}`);
+    } else {
+      query = query.eq('animal_id', animalId);
     }
 
+    const { data, error } = await query;
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ------------------------------------------------------------------
+  // STRICT READ: Fetches logs exclusively for the provided UUID
+  // ------------------------------------------------------------------
+  async getStrictLogs(animalId: string) {
     const { data, error } = await supabase
       .from('daily_logs')
-      .insert([payload])
+      .select('*, animals(name, species)')
+      .eq('animal_id', animalId)
+      .eq('is_deleted', false)
+      .order('log_date', { ascending: false });
+      
+    if (error) throw error;
+    return data || [];
+  },
+
+  // ------------------------------------------------------------------
+  // WRITE: Single Log Insertion
+  // ------------------------------------------------------------------
+  async insertLog(logData: any) {
+    const { data, error } = await supabase
+      .from('daily_logs')
+      .insert([logData])
       .select()
       .single();
 
@@ -33,13 +52,20 @@ export const dailyLogService = {
     return data;
   },
 
-  async updateLogDirect(id: string, updates: Partial<DailyLog>) {
+  // ------------------------------------------------------------------
+  // BATCH WRITE: Husbandry Multi-Insert (STRICTLY NO MEDICAL)
+  // ------------------------------------------------------------------
+  async batchInsertHusbandryLogs(logArray: any[]) {
+    // Security check to prevent accidental clinical batching
+    const isMedicalAttempt = logArray.some(log => log.log_type === 'MEDICAL' || log.log_type === 'PRESCRIPTION');
+    if (isMedicalAttempt) {
+      throw new Error("Compliance Violation: Medical interventions cannot be batched. They must be logged individually.");
+    }
+
     const { data, error } = await supabase
       .from('daily_logs')
-      .update(updates)
-      .eq('id', id)
-      .select()
-      .single();
+      .insert(logArray)
+      .select();
 
     if (error) throw error;
     return data;
