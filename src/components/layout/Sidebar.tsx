@@ -61,9 +61,9 @@ const navGroups = [
     title: 'Admin',
     icon: Settings,
     items: [
-      { name: 'Reports', to: '/staff/reports', icon: BarChart3 },
+      { name: 'Reports', to: '/reports', icon: BarChart3 },
       { name: 'Settings', to: '/settings', icon: Settings },
-      { name: 'Help', to: '/admin/help', icon: HelpCircle },
+      { name: 'Help', to: '/help', icon: HelpCircle },
     ]
   }
 ];

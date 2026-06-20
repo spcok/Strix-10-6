@@ -305,7 +305,7 @@ export function RotaPage() {
                       return (
                         <div key={staff.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="flex hover:bg-slate-50/50 transition-colors group/row">
                           <div className="w-56 shrink-0 p-3 border-r border-slate-200 bg-white sticky left-0 z-20 flex flex-col justify-center shadow-[4px_0_10px_-4px_rgba(0,0,0,0.05)] group-hover/row:bg-slate-50/50 transition-colors">
-                            <span className="text-xs font-black text-slate-900 truncate">{staff.name || staff.email}</span>
+                            <span className="text-xs font-black text-slate-900 truncate">{staff.name || 'Unnamed'}</span>
                             <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest truncate">{staff.role}</span>
                           </div>
 

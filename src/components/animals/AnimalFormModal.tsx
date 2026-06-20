@@ -25,7 +25,7 @@ type TabId = typeof TABS[number]['id'];
 // ------------------------------------------------------------------
 // EXTRACTED COMPONENTS: Prevents DOM destruction & unmounting on keystroke
 // ------------------------------------------------------------------
-function FormInput({ field, label, type = 'text', placeholder }: { field: FieldApi<any, any, any, any>; label: string; type?: string; placeholder?: string }) {
+function FormInput({ field, label, type = 'text', placeholder }: { field: any; label: string; type?: string; placeholder?: string }) {
   return (
     <div className="flex flex-col gap-1.5">
       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
@@ -51,7 +51,7 @@ function FormInput({ field, label, type = 'text', placeholder }: { field: FieldA
   );
 }
 
-function FormSelect({ field, label, options }: { field: FieldApi<any, any, any, any>; label: string; options: { value: string, label: string }[] }) {
+function FormSelect({ field, label, options }: { field: any; label: string; options: { value: string, label: string }[] }) {
   return (
     <div className="flex flex-col gap-1.5">
       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
@@ -69,7 +69,7 @@ function FormSelect({ field, label, options }: { field: FieldApi<any, any, any, 
   );
 }
 
-function FormCheckbox({ field, label }: { field: FieldApi<any, any, any, any>; label: string }) {
+function FormCheckbox({ field, label }: { field: any; label: string }) {
   return (
     <label className="flex items-center gap-3 p-3 bg-slate-50 border border-slate-200 rounded-xl cursor-pointer hover:bg-slate-100 transition-colors">
       <input

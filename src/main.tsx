@@ -27,17 +27,17 @@ const queryClient = new QueryClient({
     mutations: {
       networkMode: 'offlineFirst',
       // ENTERPRISE FIX: Intercept 401 Auth errors to prevent queue deletion
-      retry: async (failureCount, error: any) => {
+      retry: (failureCount, error: any) => {
         const isAuthError = error?.status === 401 || error?.code === 'PGRST301' || error?.message?.includes('JWT');
         
         if (isAuthError) {
           console.warn('[Sync Engine] Auth token expired during offline sync. Attempting GoTrue refresh...');
-          const { data } = await supabase.auth.refreshSession();
-          
-          if (data?.session) {
-            console.log('[Sync Engine] Session securely restored. Forcing mutation retry.');
-            return true; // Force TanStack to retry the payload with the new token
-          }
+          supabase.auth.refreshSession().then(({ data }) => {
+            if (data?.session) {
+              console.log('[Sync Engine] Session securely restored. Forcing mutation retry.');
+            }
+          });
+          return true; // Force TanStack to retry the payload with the new token
         }
         
         // Default behavior: retry standard network errors up to 3 times
