@@ -135,7 +135,7 @@ export const reportExportService = {
                   width: { size: 40, type: WidthType.PERCENTAGE },
                   children: logoBuffer ? [
                     new Paragraph({
-                      children: [new ImageRun({ data: logoBuffer, transformation: { width: 100, height: 75 } })],
+                      children: [new ImageRun({ data: logoBuffer, transformation: { width: 100, height: 75 } } as any)],
                       alignment: AlignmentType.LEFT
                     })
                   ] : [new Paragraph({ text: "" })]
@@ -196,7 +196,7 @@ export const reportExportService = {
       ? [
           new Paragraph({ text: "Telemetry Visualization", heading: HeadingLevel.HEADING_2, spacing: { before: 200, after: 200 } }),
           new Paragraph({ 
-            children: [new ImageRun({ data: payload.chartImage, transformation: { width: 600, height: 300 } })], 
+            children: [new ImageRun({ data: payload.chartImage, transformation: { width: 600, height: 300 } } as any)], 
             alignment: AlignmentType.CENTER,
             spacing: { after: 400 }
           })
@@ -214,14 +214,14 @@ export const reportExportService = {
             shading: { fill: COLORS.headerBg },
             width: { size: colWidth, type: WidthType.PERCENTAGE },
             margins: { top: 75, bottom: 75, left: 100, right: 100 },
-            children: [new Paragraph({ text: sanitizeCell(col), bold: true, color: COLORS.text, alignment: AlignmentType.LEFT })]
+            children: [new Paragraph({ children: [new TextRun({ text: sanitizeCell(col), bold: true, color: COLORS.text })], alignment: AlignmentType.LEFT })]
           }))
         }),
         ...payload.data.map(rowData => new TableRow({
           children: rowData.map((cellData: any) => new TableCell({
             width: { size: colWidth, type: WidthType.PERCENTAGE },
             margins: { top: 50, bottom: 50, left: 100, right: 100 },
-            children: [new Paragraph({ text: sanitizeCell(cellData), color: COLORS.text })]
+            children: [new Paragraph({ children: [new TextRun({ text: sanitizeCell(cellData), color: COLORS.text })] })]
           }))
         }))
       ]

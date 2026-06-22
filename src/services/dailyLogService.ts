@@ -69,5 +69,34 @@ export const dailyLogService = {
 
     if (error) throw error;
     return data;
+  },
+
+  // ------------------------------------------------------------------
+  // LEGACY READ ALIAS
+  // ------------------------------------------------------------------
+  async getLogsByAnimal(animalId: string, parentGroupId?: string | null) {
+    return this.getCascadedLogs(animalId, parentGroupId);
+  },
+
+  // ------------------------------------------------------------------
+  // WRITE: Commit Log (Optimistic Insertion)
+  // ------------------------------------------------------------------
+  async commitLog(logData: any) {
+    return this.insertLog(logData);
+  },
+
+  // ------------------------------------------------------------------
+  // WRITE: Update Specific Log Direct
+  // ------------------------------------------------------------------
+  async updateLogDirect(id: string, updates: any) {
+    const { data, error } = await supabase
+      .from('daily_logs')
+      .update(updates)
+      .eq('id', id)
+      .select()
+      .single();
+
+    if (error) throw error;
+    return data;
   }
 };

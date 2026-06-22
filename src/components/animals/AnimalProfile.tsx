@@ -1,411 +1,367 @@
 import React, { useState } from 'react';
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeft, FileText, Stethoscope, ClipboardList, AlertTriangle, ShieldAlert, Scale, Thermometer, GitMerge, Edit, Archive, RefreshCcw, Loader2, Plus, Calendar, X } from 'lucide-react';
-import { format } from 'date-fns';
-import AnimalFormModal from './AnimalFormModal';
-import DailyLogFormModal from './DailyLogFormModal';
-import { dailyLogService } from '../../services/dailyLogService';
+import { useParams } from '@tanstack/react-router';
+import { useQuery } from '@tanstack/react-query';
+import { 
+  FileText, Stethoscope, ClipboardList, ArrowLeft, ShieldAlert, 
+  Thermometer, Scale, AlertTriangle, GitMerge, Edit2, Archive, 
+  MapPin, Hash, Info, Lock
+} from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Animal, DailyLog } from '../../types';
+import { IUCNBadge } from './IUCNBadge';
+import AnimalFormModal from './AnimalFormModal';
+import MedicalRecords from '../medical/MedicalRecords';
+import HusbandryLogs from '../husbandry/HusbandryLogs';
+import { formatWeightDisplay } from '../../services/weightUtils';
 
-interface AnimalProfileProps {
-  animal: Animal;
-  onClose: () => void;
+// ------------------------------------------------------------------
+// UTILITY: High-Density Age Calculator
+// ------------------------------------------------------------------
+const calculateAge = (dobString: string | null) => {
+  if (!dobString) return 'Unknown Age';
+  const birth = new Date(dobString);
+  const now = new Date();
+  let years = now.getFullYear() - birth.getFullYear();
+  let months = now.getMonth() - birth.getMonth();
+  if (months < 0 || (months === 0 && now.getDate() < birth.getDate())) {
+    years--;
+    months += 12;
+  }
+  if (years === 0) return `${months} Months`;
+  return `${years} Yrs ${months} Mos`;
+};
+
+export interface Props {
+  animalId?: string;
+  onBack?: () => void;
 }
 
-export function AnimalProfile({ animal, onClose }: AnimalProfileProps) {
-  const queryClient = useQueryClient();
+export default function AnimalProfile({ animalId, onBack }: Props) {
+  // Use TanStack Router's dynamic param (fallback to prop if nested)
+  const params = useParams({ strict: false });
+  const effectiveId = animalId || params.id || '';
   
   const [activeTab, setActiveTab] = useState<'profile' | 'medical' | 'husbandry'>('profile');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-  const [isLogModalOpen, setIsLogModalOpen] = useState(false);
-  const [editingLogTarget, setEditingLogTarget] = useState<DailyLog | undefined>(undefined);
-  const [logModalMode, setLogModalMode] = useState<'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION'>('OBSERVATION');
-  
-  const [isArchiveModalOpen, setIsArchiveModalOpen] = useState(false);
-  const [dispositionType, setDispositionType] = useState('TRANSFER_OUT');
-  
-  // Safe local date formatting
-  const [dispositionDate, setDispositionDate] = useState(format(new Date(), 'yyyy-MM-dd'));
-  const [destination, setDestination] = useState('');
-  const [dispositionNotes, setDispositionNotes] = useState('');
 
-  const { data: husbandryLogs = [], isLoading: loadingLogs } = useQuery({
-    queryKey: ['animal_logs', animal?.id],
-    queryFn: () => dailyLogService.getLogsByAnimal(animal.id),
-    enabled: !!animal?.id && activeTab === 'husbandry'
-  });
-
-  const archiveMutation = useMutation({
-    mutationFn: async () => {
-      if (dispositionType === 'TRANSFER_OUT') {
-        const { error: transferError } = await supabase.from('external_transfers').insert([{
-          animal_id: animal.id,
-          transfer_type: dispositionType,
-          transfer_date: dispositionDate,
-          entity_name: destination || 'Unknown Institution',
-          notes: dispositionNotes
-        }]);
-        if (transferError) throw transferError;
-      }
-
-      const archiveReasonString = `[${dispositionType}] ${destination && dispositionType === 'TRANSFER_OUT' ? 'To: ' + destination + ' - ' : ''}${dispositionNotes}`;
+  // ------------------------------------------------------------------
+  // MODERNIZED TANSTACK QUERY v5
+  // Replaces the opaque 'useAnimalProfileData' legacy hook
+  // ------------------------------------------------------------------
+  const { data: animal, isLoading } = useQuery({
+    queryKey: ['animal_profile', effectiveId],
+    queryFn: async () => {
+      if (!effectiveId) throw new Error("No Animal ID provided");
       
-      const { error: updateError } = await supabase
+      const { data, error } = await supabase
         .from('animals')
-        .update({ 
-          status: 'ARCHIVED', 
-          archive_reason: archiveReasonString 
-        })
-        .eq('id', animal.id);
+        .select('*')
+        .eq('id', effectiveId)
+        .single();
         
-      if (updateError) throw updateError;
+      if (error) throw error;
+      return data;
     },
-    onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['animals', 'dashboard'] });
-      setIsArchiveModalOpen(false);
-      setDispositionNotes('');
-      setDestination('');
-    }
+    enabled: !!effectiveId,
+    staleTime: 1000 * 60 * 5, // Cache profile for 5 minutes before background refetch
   });
 
-  const handleUnarchive = () => {
-    supabase.from('animals').update({ status: 'OFF_DISPLAY', archive_reason: null }).eq('id', animal.id)
-      .then(() => queryClient.invalidateQueries({ queryKey: ['animals', 'dashboard'] }));
-  };
+  if (isLoading) {
+    return (
+      <div className="flex items-center justify-center min-h-[400px]">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-emerald-600"></div>
+      </div>
+    );
+  }
 
-  const triggerEditLog = (log: DailyLog, mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION' = 'OBSERVATION') => {
-    setEditingLogTarget(log);
-    setLogModalMode(mode);
-    setIsLogModalOpen(true);
-  };
+  if (!animal) {
+    return (
+      <div className="max-w-4xl mx-auto p-8 text-center bg-white border border-slate-200 rounded-2xl shadow-sm mt-8">
+        <AlertTriangle className="text-rose-500 mx-auto mb-3" size={32} />
+        <h3 className="text-base font-black text-slate-900 uppercase tracking-tight">Animal Profile Resolution Failed</h3>
+        <p className="text-xs font-bold text-slate-400 uppercase tracking-widest mt-1">Entity ID {effectiveId} does not exist in local cache or remote tables.</p>
+      </div>
+    );
+  }
 
-  if (!animal) return null;
+  const tabs = [
+    { id: 'profile', label: 'Profile Matrix', icon: FileText },
+    { id: 'medical', label: 'Medical Records', icon: Stethoscope },
+    { id: 'husbandry', label: 'Husbandry Logs', icon: ClipboardList },
+  ] as const;
 
   return (
-    <div className="fixed inset-0 z-[40] bg-slate-900/40 backdrop-blur-sm overflow-y-auto custom-scrollbar p-4 md:p-6 flex items-start justify-center">
-      <div className="w-full max-w-5xl space-y-4">
-        
-        <button onClick={onClose} className="flex items-center gap-2 text-white/80 hover:text-white font-bold text-xs uppercase tracking-widest mb-2 transition-colors drop-shadow-md">
-          <ArrowLeft size={16} /> Back to Dashboard
+    <div className="max-w-[1920px] mx-auto space-y-6 animate-in fade-in duration-300 pb-24">
+      
+      {/* Back Link Wrapper */}
+      {onBack && (
+        <button onClick={onBack} className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-500 hover:text-slate-900 transition-colors">
+          <ArrowLeft size={14} /> Back To Overview
         </button>
+      )}
 
-        <div className="bg-white border border-slate-200 rounded-3xl shadow-xl p-5 flex flex-col md:flex-row gap-6 relative overflow-hidden">
-          <div className="w-full md:w-1/3 flex flex-col gap-4 relative z-10">
-            <div className="relative w-full h-[300px] bg-slate-50 border border-slate-200 rounded-2xl overflow-hidden shadow-sm flex items-center justify-center">
-              {animal.profile_image_url ? (
-                <img src={animal.profile_image_url as string} alt={animal.name || 'Animal'} className="w-full h-full object-cover" />
-              ) : (
-                <span className="text-slate-400 font-black text-xs uppercase tracking-widest">No Media</span>
+      {/* HERO REGISTRY CARD */}
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm p-6 flex flex-col lg:flex-row gap-6 relative">
+        
+        {/* Absolute Floating Badges & Quick Action Control Group */}
+        <div className="absolute top-6 right-6 flex items-center gap-3 z-20">
+          <div className="flex gap-1.5 shadow-sm rounded-lg overflow-hidden">
+            {animal.is_boarding && (
+              <span className="px-2.5 py-1.5 bg-amber-50 text-amber-700 text-[9px] font-black border border-amber-200 uppercase tracking-widest">Boarding</span>
+            )}
+            {animal.is_deleted && (
+              <span className="px-2.5 py-1.5 bg-rose-50 text-rose-700 text-[9px] font-black border border-rose-200 uppercase tracking-widest">Archived</span>
+            )}
+            <IUCNBadge status={animal.red_list_status} />
+          </div>
+          <div className="flex items-center gap-1 border-l border-slate-200 pl-3">
+            <button 
+              onClick={() => setIsEditModalOpen(true)}
+              className="p-2 text-slate-400 hover:text-emerald-600 hover:bg-emerald-50 border border-transparent hover:border-emerald-200 rounded-xl transition-all"
+              title="Edit Profile"
+            >
+              <Edit2 size={16} />
+            </button>
+            <button 
+              className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200 rounded-xl transition-all"
+              title="Archive Profile"
+            >
+              <Archive size={16} />
+            </button>
+          </div>
+        </div>
+
+        {/* Left Hand: High-Res Profile Image Frame */}
+        <div className="w-full lg:w-72 shrink-0">
+          <div className="relative w-full aspect-square lg:h-64 lg:w-64 rounded-2xl overflow-hidden border border-slate-200 shadow-inner bg-slate-50 mx-auto lg:mx-0">
+            <img
+              src={animal.profile_image_url || '/offline-media-fallback.svg'}
+              alt={animal.name}
+              className="w-full h-full object-cover"
+              referrerPolicy="no-referrer"
+              onError={(e) => { e.currentTarget.src = '/offline-media-fallback.svg'; }}
+            />
+          </div>
+        </div>
+        
+        {/* Right Hand: High-Density Telemetry Matrix */}
+        <div className="flex-grow flex flex-col justify-between pt-2">
+          <div>
+            <div className="space-y-1 mb-6">
+              <h1 className="text-4xl font-black text-slate-900 tracking-tight leading-none">{animal.name}</h1>
+              {animal.latin_name && (
+                <p className="text-sm font-bold text-slate-400 italic tracking-wide">{animal.latin_name}</p>
               )}
             </div>
-          </div>
-          
-          <div className="flex-1 flex flex-col justify-between relative z-10">
-            <div>
-              <div className="flex justify-between items-start mb-2">
-                <h1 className="text-3xl font-black text-slate-900 tracking-tight">{animal.name || 'Unnamed'}</h1>
-                <div className="flex gap-2">
-                  {animal.status === 'ARCHIVED' && <span className="px-2.5 py-1 bg-slate-100 border border-slate-300 text-slate-600 text-[10px] font-black rounded-lg uppercase tracking-widest shadow-sm">Archived Record</span>}
-                  {animal.is_boarding && <span className="px-2.5 py-1 bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-black rounded-lg uppercase tracking-widest shadow-sm">Boarding</span>}
-                  {animal.is_quarantine && <span className="px-2.5 py-1 bg-rose-50 border border-rose-200 text-rose-700 text-[10px] font-black rounded-lg uppercase tracking-widest shadow-sm">Quarantine</span>}
-                  
-                  <div className="flex items-center gap-2 ml-2 pl-2 border-l border-slate-200">
-                    <button onClick={() => setIsEditModalOpen(true)} className="p-2 bg-white border border-slate-200 text-emerald-600 hover:bg-emerald-50 rounded-xl transition-colors shadow-sm">
-                      <Edit size={16} />
-                    </button>
-                    {animal.status === 'ARCHIVED' ? (
-                      <button onClick={handleUnarchive} className="p-2 bg-white border border-slate-200 text-blue-600 hover:bg-blue-50 rounded-xl transition-colors shadow-sm">
-                        <RefreshCcw size={16} />
-                      </button>
-                    ) : (
-                      <button onClick={() => setIsArchiveModalOpen(true)} className="p-2 bg-white border border-slate-200 text-rose-600 hover:bg-rose-50 rounded-xl transition-colors shadow-sm">
-                        <Archive size={16} />
-                      </button>
-                    )}
-                  </div>
-                </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-y-6 gap-x-6">
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Taxon / Species</span>
+                <span className="text-sm font-bold text-slate-800">{animal.species}</span>
               </div>
-              
-              <div className="flex flex-col gap-1 mb-6">
-                <p className="text-slate-400 font-bold text-[10px] uppercase tracking-widest">ID: {animal.id}</p>
-                <p className="text-slate-400 font-bold text-[10px] uppercase tracking-widest">
-                  Ring: <span className="text-slate-600">{animal.ring_number || 'Un-ringed'}</span> | Chip: <span className="text-slate-600">{animal.microchip_id || 'None'}</span>
-                </p>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Sex Identity</span>
+                <span className="text-sm font-bold text-slate-800">{animal.gender || 'Determining'}</span>
               </div>
-              
-              <div className="grid grid-cols-2 sm:grid-cols-3 gap-y-6 gap-x-4">
-                <div>
-                  <span className="text-slate-400 font-black text-[10px] uppercase tracking-widest block mb-1">Species</span>
-                  <span className="text-sm font-bold text-slate-900">{animal.species || '--'}</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 font-black text-[10px] uppercase tracking-widest block mb-1">Sex</span>
-                  <span className="text-sm font-bold text-slate-900">{animal.gender || 'Unknown'}</span>
-                </div>
-                <div>
-                  <span className="text-slate-400 font-black text-[10px] uppercase tracking-widest block mb-1">Origin</span>
-                  <span className="text-sm font-bold text-slate-900">{animal.origin || 'Unknown'}</span>
-                </div>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Computed Age</span>
+                <span className="text-sm font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 border border-emerald-200 rounded inline-block">{calculateAge(animal.date_of_birth)}</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Operational Location</span>
+                <span className="text-sm font-bold text-slate-800 flex items-center gap-1.5">
+                  <MapPin size={14} className="text-slate-400" /> {animal.location || 'Staging / Isolation'}
+                </span>
+              </div>
+
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Acquisition Source</span>
+                <span className="text-sm font-bold text-slate-800">{animal.origin || 'Captive Bred'}</span>
+              </div>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Hatch / Birth Date</span>
+                <span className="text-sm font-semibold text-slate-600 font-mono">
+                  {animal.date_of_birth ? new Date(animal.date_of_birth).toLocaleDateString() : 'Unrecorded'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Entry To Station</span>
+                <span className="text-sm font-semibold text-slate-600 font-mono">
+                  {animal.acquisition_date ? new Date(animal.acquisition_date).toLocaleDateString() : 'Unrecorded'}
+                </span>
+              </div>
+              <div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Disposition Status</span>
+                <span className="text-sm font-bold text-slate-800">{animal.status || 'Active Collection'}</span>
               </div>
             </div>
+          </div>
+
+          {/* Sub-Header Physical Tracking Identifiers */}
+          <div className="mt-8 pt-4 border-t border-slate-100 flex flex-wrap gap-x-8 gap-y-2 text-slate-500 font-mono text-xs font-bold">
+            <span className="flex items-center gap-2"><Hash size={14} className="text-slate-400" /> Internal ID: <span className="text-slate-800">{animal.id.split('-')[0]}</span></span>
+            <span className="flex items-center gap-2"><Info size={14} className="text-slate-400" /> Ring Code: <span className="text-slate-800">{animal.ring_number || 'UN-RINGED'}</span></span>
+            <span className="flex items-center gap-2"><Lock size={14} className="text-slate-400" /> Microchip Transponder: <span className="text-slate-800">{animal.microchip_id || 'NONE DETECTED'}</span></span>
           </div>
         </div>
-
-        <div className="bg-white border border-slate-200 rounded-3xl shadow-xl overflow-hidden min-h-[400px] flex flex-col">
-          <div className="border-b border-slate-100 bg-slate-50 px-4 pt-2 flex justify-between items-center overflow-x-auto custom-scrollbar">
-            <div className="flex gap-4">
-              {[{ id: 'profile', label: 'Profile Matrix', icon: FileText }, { id: 'medical', label: 'Medical', icon: Stethoscope }, { id: 'husbandry', label: 'Husbandry Logs', icon: ClipboardList }].map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setActiveTab(tab.id as any)}
-                  className={`flex items-center gap-2 pb-3 px-2 border-b-2 transition-all font-black text-xs uppercase tracking-widest whitespace-nowrap ${
-                    activeTab === tab.id ? 'border-emerald-500 text-emerald-600' : 'border-transparent text-slate-400 hover:text-slate-700'
-                  }`}
-                >
-                  <tab.icon size={16} />
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-
-            {activeTab === 'husbandry' && (
-              <button
-                onClick={() => { setEditingLogTarget(undefined); setLogModalMode('OBSERVATION'); setIsLogModalOpen(true); }}
-                className="mb-2 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-sm shrink-0"
-              >
-                <Plus size={12} /> Log Metric
-              </button>
-            )}
-          </div>
-
-          <div className="p-6 flex-1 bg-white">
-            {activeTab === 'profile' && (
-              <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-5">
-                {animal.critical_husbandry_notes && (
-                  <div className="bg-rose-50 border border-rose-200 rounded-2xl p-5 lg:col-span-1 xl:col-span-2 shadow-sm">
-                    <div className="flex items-center gap-3 mb-4">
-                      <AlertTriangle className="text-rose-600" size={18} />
-                      <h3 className="font-black text-rose-900 uppercase tracking-widest text-xs">Critical Husbandry Notes</h3>
-                    </div>
-                    <p className="text-sm font-bold text-rose-700 leading-relaxed whitespace-pre-wrap">{animal.critical_husbandry_notes}</p>
-                  </div>
-                )}
-
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4">
-                    <ShieldAlert className="text-amber-500" size={18} />
-                    <h3 className="font-black text-slate-900 uppercase tracking-widest text-xs">Safety</h3>
-                  </div>
-                  <div className="space-y-3 text-sm font-bold">
-                    <div className="flex justify-between"><span className="text-slate-500">Hazard Rating:</span> <span className="text-slate-700">{animal.hazard_rating || 'None'}</span></div>
-                  </div>
-                </div>
-
-                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm">
-                  <div className="flex items-center gap-3 mb-4">
-                    <Scale className="text-emerald-500" size={18} />
-                    <h3 className="font-black text-slate-900 uppercase tracking-widest text-xs">Weights</h3>
-                  </div>
-                  <div className="space-y-3 text-sm font-bold">
-                    <div className="flex justify-between"><span className="text-slate-500">Flying Weight:</span> <span className="text-slate-700">{animal.flying_weight ? `${animal.flying_weight}g` : '--'}</span></div>
-                    <div className="flex justify-between"><span className="text-slate-500">Winter Weight:</span> <span className="text-slate-700">{animal.winter_weight ? `${animal.winter_weight}g` : '--'}</span></div>
-                  </div>
-                </div>
-              </div>
-            )}
-            
-            {activeTab === 'medical' && <div className="text-center py-10 text-slate-400 text-xs font-black uppercase tracking-widest">Medical Pending Deployment</div>}
-            
-            {activeTab === 'husbandry' && (
-              <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden">
-                {loadingLogs ? (
-                  <div className="flex items-center justify-center h-48 text-slate-400 font-black text-xs uppercase tracking-widest animate-pulse">Syncing Log Archive...</div>
-                ) : husbandryLogs.length === 0 ? (
-                  <div className="text-center py-20 text-slate-400 text-xs font-black uppercase tracking-widest">No Logs Recorded For This Entity</div>
-                ) : (
-                  <div className="w-full overflow-x-auto custom-scrollbar">
-                    <table className="w-full text-left text-sm border-collapse">
-                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-black text-[9px] uppercase tracking-widest">
-                        <tr>
-                          <th className="px-4 py-3">Date</th>
-                          <th className="px-4 py-3">Weight</th>
-                          <th className="px-4 py-3">Thermal Env</th>
-                          <th className="px-4 py-3">Feeding / Meals Logs</th>
-                          <th className="px-4 py-3">Observations</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 text-xs font-bold text-slate-700">
-                        {husbandryLogs.map((log) => {
-                          const feedDetailsParsed = typeof log.feed_details === 'string'
-                            ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })()
-                            : log.feed_details;
-                          const meals = feedDetailsParsed?.meals || [];
-                          return (
-                            <tr key={log.id} className="hover:bg-slate-50/80 transition-colors">
-                              <td className="px-4 py-3 whitespace-nowrap text-slate-400">
-                                {new Date(log.log_date).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}
-                              </td>
-                              <td className="px-4 py-3 whitespace-nowrap">
-                                <button onClick={() => triggerEditLog(log, 'WEIGHT')} className="text-slate-900 font-black hover:text-emerald-600 hover:underline">
-                                  {log.weight_not_required ? (
-                                    <span className="text-[10px] text-slate-400 uppercase font-bold tracking-tight">Not Required</span>
-                                  ) : log.weight_grams ? (
-                                    `${log.weight_grams}${log.weight_unit || 'g'}`
-                                  ) : (
-                                    <span className="text-slate-300">--</span>
-                                  )}
-                                </button>
-                              </td>
-                              <td className="px-4 py-3 whitespace-nowrap">
-                                <button onClick={() => triggerEditLog(log, 'TEMPERATURE')} className="flex flex-col text-left gap-0.5 hover:text-emerald-600">
-                                  {log.temperature_c && <span className="text-[10px] text-slate-600">Amb: {log.temperature_c}°C</span>}
-                                  {log.basking_temp_c && <span className="text-[10px] text-amber-600 font-black">Bask: {log.basking_temp_c}°C</span>}
-                                </button>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="flex flex-col gap-1.5 min-w-[180px]">
-                                  {meals.length === 0 ? (
-                                    <span className="text-slate-300 italic text-[11px]">No meals fed</span>
-                                  ) : (
-                                    meals.map((meal: any, idx: number) => (
-                                      <div key={idx} className="bg-slate-50 border border-slate-200 p-1.5 rounded-lg text-[10px] flex flex-col gap-0.5 shadow-sm">
-                                        <div className="flex justify-between font-black text-slate-800">
-                                          <span>{meal.food_item || 'Unknown'}</span>
-                                          <span className="text-slate-400">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
-                                        </div>
-                                        <div className="text-slate-500 font-bold">
-                                          Offered: {meal.food_offered_g}g | Consumed: <span className="text-emerald-600">{meal.food_consumed_g}g</span>
-                                        </div>
-                                        {meal.calci_dust_added && <span className="text-[9px] font-black tracking-widest uppercase text-amber-600 bg-amber-50 rounded px-1 w-max mt-0.5">Calci-Dust</span>}
-                                      </div>
-                                    ))
-                                  )}
-                                  <button onClick={() => { setEditingLogTarget(log); setLogModalMode('FEEDING'); setIsLogModalOpen(true); }} className="text-[9px] font-black text-slate-400 hover:text-amber-600 uppercase tracking-widest text-left mt-0.5">
-                                    + Add Sub Meal
-                                  </button>
-                                </div>
-                              </td>
-                              <td className="px-4 py-3 max-w-xs text-slate-500 font-medium leading-relaxed">
-                                <button onClick={() => triggerEditLog(log, 'OBSERVATION')} className="text-left hover:text-slate-900 block w-full text-[11px]">
-                                  {log.notes || <span className="text-slate-300 italic">No observation recorded</span>}
-                                </button>
-                              </td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {isEditModalOpen && <AnimalFormModal isOpen={isEditModalOpen} onClose={() => setIsEditModalOpen(false)} initialData={animal} />}
-        
-        {isLogModalOpen && (
-          <DailyLogFormModal 
-            isOpen={isLogModalOpen} 
-            onClose={() => setIsLogModalOpen(false)} 
-            animal={animal} 
-            mode={logModalMode}
-            initialLogData={editingLogTarget} 
-          />
-        )}
-
-        {isArchiveModalOpen && (
-          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4 sm:p-6 bg-slate-900/60 backdrop-blur-sm">
-            <div className="bg-white w-full max-w-xl rounded-2xl shadow-2xl overflow-hidden border border-slate-200">
-              <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50">
-                <div>
-                  <h2 className="text-lg font-bold text-slate-900 tracking-tight text-rose-600">Process Animal Disposition</h2>
-                  <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-0.5">Database Archiving</p>
-                </div>
-                <button onClick={() => setIsArchiveModalOpen(false)} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors">
-                  <X size={20} />
-                </button>
-              </div>
-
-              <form onSubmit={(e) => { e.preventDefault(); archiveMutation.mutate(); }} className="p-6 space-y-5 bg-white">
-                <div className="p-4 bg-rose-50 border border-rose-200 rounded-xl flex gap-3 text-rose-800">
-                  <AlertTriangle size={20} className="shrink-0" />
-                  <p className="text-xs font-bold leading-relaxed">
-                    Executing this transaction will permanently remove <span className="font-black uppercase">{animal.name}</span> from the active collection.
-                  </p>
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="col-span-2 sm:col-span-1">
-                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Disposition Type</label>
-                    <select 
-                      value={dispositionType} 
-                      onChange={(e) => setDispositionType(e.target.value)} 
-                      className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold focus:ring-2 focus:ring-rose-500/20 outline-none"
-                      required
-                    >
-                      <option value="TRANSFER_OUT">Transferred Out</option>
-                      <option value="DECEASED">Deceased / Euthanasia</option>
-                    </select>
-                  </div>
-                  
-                  <div className="col-span-2 sm:col-span-1">
-                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Date of Disposition</label>
-                    <input 
-                      type="date" 
-                      value={dispositionDate} 
-                      onChange={(e) => setDispositionDate(e.target.value)} 
-                      className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold focus:ring-2 focus:ring-rose-500/20 outline-none"
-                      required
-                    />
-                  </div>
-
-                  {dispositionType === 'TRANSFER_OUT' && (
-                    <div className="col-span-2">
-                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Receiving Institution / Individual</label>
-                      <input 
-                        type="text" 
-                        value={destination} 
-                        onChange={(e) => setDestination(e.target.value)} 
-                        placeholder="e.g. London Zoo"
-                        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold focus:ring-2 focus:ring-rose-500/20 outline-none"
-                        required={dispositionType === 'TRANSFER_OUT'}
-                      />
-                    </div>
-                  )}
-
-                  <div className="col-span-2">
-                    <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5">Authorizing Notes / Incident Details</label>
-                    <textarea 
-                      value={dispositionNotes} 
-                      onChange={(e) => setDispositionNotes(e.target.value)} 
-                      placeholder={dispositionType === 'DECEASED' ? "Enter PM results or attending vet details..." : "Enter formal authorization notes..."}
-                      className="w-full p-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold focus:ring-2 focus:ring-rose-500/20 outline-none h-24 resize-none custom-scrollbar"
-                      required
-                    />
-                  </div>
-                </div>
-
-                <div className="pt-4 flex items-center justify-end gap-3 border-t border-slate-100">
-                  <button type="button" onClick={() => setIsArchiveModalOpen(false)} className="px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-100 rounded-xl transition-colors">
-                    Cancel
-                  </button>
-                  <button 
-                    type="submit" 
-                    disabled={archiveMutation.isPending}
-                    className="flex items-center gap-2 px-6 py-2.5 bg-rose-600 hover:bg-rose-500 disabled:bg-rose-800 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-[0_0_15px_rgba(225,29,72,0.15)]"
-                  >
-                    {archiveMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Archive size={16} />}
-                    {archiveMutation.isPending ? 'Processing...' : 'Confirm Disposition'}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
 
       </div>
+
+      {/* TAB SYSTEM LAYER */}
+      <div className="border-b-2 border-slate-200">
+        <nav className="flex gap-8">
+          {tabs.map((tab) => {
+            const isTabActive = activeTab === tab.id;
+            return (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`flex items-center gap-2 pb-4 px-2 text-[11px] font-black uppercase tracking-widest border-b-2 transition-all ${
+                  isTabActive 
+                    ? 'border-emerald-600 text-emerald-700' 
+                    : 'border-transparent text-slate-400 hover:text-slate-800'
+                }`}
+              >
+                <tab.icon size={16} />
+                {tab.label}
+              </button>
+            )
+          })}
+        </nav>
+      </div>
+
+      {/* DYNAMIC SUB-CONTENT ROUTING */}
+      <div className="min-h-[400px]">
+        {activeTab === 'profile' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
+            
+            {/* CRITICAL HUSBANDRY NOTES PANEL */}
+            <div className="bg-rose-50/50 border border-rose-200 rounded-2xl p-6 md:col-span-2 xl:col-span-3">
+              <div className="flex items-center gap-3 mb-4 border-b border-rose-100 pb-3">
+                <AlertTriangle className="text-rose-600" size={20} />
+                <h3 className="text-sm font-black text-rose-900 uppercase tracking-widest">Critical Husbandry Alerts</h3>
+              </div>
+              {animal.critical_husbandry_notes ? (
+                <div className="text-sm font-bold text-rose-800 leading-relaxed whitespace-pre-wrap">
+                  {/* Assumes the DB stores this as text or JSON array. If JSON array, map it. If text, render it. */}
+                  {Array.isArray(animal.critical_husbandry_notes) 
+                    ? animal.critical_husbandry_notes.map((n, i) => <p key={i} className="flex gap-2"><span className="text-rose-500">•</span>{n}</p>)
+                    : animal.critical_husbandry_notes}
+                </div>
+              ) : (
+                <p className="text-xs font-semibold text-rose-700 italic">No historical or behavior constraint alerts logged for this animal.</p>
+              )}
+            </div>
+
+            {/* WEIGHT TARGET CONFIGURATOR CARD */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-3">
+                <Scale className="text-emerald-600" size={18} />
+                <h3 className="text-xs font-black text-slate-900 uppercase tracking-widest">Weight Management Boundaries</h3>
+              </div>
+              <div className="space-y-3">
+                <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-100">
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target Flying Weight</span>
+                  <span className="text-sm font-black text-emerald-700">
+                    {animal.flying_weight !== null ? formatWeightDisplay(animal.flying_weight, animal.weight_unit) : 'Not Configured'}
+                  </span>
+                </div>
+                <div className="flex justify-between items-center bg-slate-50 p-3 rounded-xl border border-slate-100">
+                  <span className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Target Winter Weight</span>
+                  <span className="text-sm font-black text-slate-800">
+                    {animal.winter_weight !== null ? formatWeightDisplay(animal.winter_weight, animal.weight_unit) : 'Not Configured'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* ENVIRONMENTAL TELEMETRY TARGETS CARD */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-3">
+                <Thermometer className="text-emerald-600" size={18} />
+                <h3 className="text-xs font-black text-slate-900 uppercase tracking-widest">Environmental Thresholds</h3>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Day Target</p>
+                  <p className="text-sm font-black text-slate-800">{animal.target_day_temp_c ?? 'N/A'}°C</p>
+                </div>
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 text-center">
+                  <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-1">Night Target</p>
+                  <p className="text-sm font-black text-slate-800">{animal.target_night_temp_c ?? 'N/A'}°C</p>
+                </div>
+                <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 col-span-2 text-center flex justify-between items-center px-4">
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Humidity Spectrum</p>
+                  <p className="text-sm font-bold text-slate-800">
+                    {animal.target_humidity_min_percent && animal.target_humidity_max_percent ? `${animal.target_humidity_min_percent}% - ${animal.target_humidity_max_percent}%` : 'Unregulated'}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* GENETIC LINEAGE & CONTROLS CARD */}
+            <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+              <div className="flex items-center gap-3 mb-5 border-b border-slate-100 pb-3">
+                <GitMerge className="text-emerald-600" size={18} />
+                <h3 className="text-xs font-black text-slate-900 uppercase tracking-widest">Lineage & Genetics</h3>
+              </div>
+              <div className="space-y-3.5 text-xs font-bold">
+                <div className="flex justify-between items-center text-slate-600">
+                  <span className="font-black text-[10px] uppercase tracking-widest text-slate-400">Sire Lineage ID</span>
+                  <span className="font-mono text-slate-900 bg-slate-50 px-2 py-1 rounded border border-slate-100">{animal.sire_id ?? 'Wild Hatch / Unknown'}</span>
+                </div>
+                <div className="flex justify-between items-center text-slate-600">
+                  <span className="font-black text-[10px] uppercase tracking-widest text-slate-400">Dam Lineage ID</span>
+                  <span className="font-mono text-slate-900 bg-slate-50 px-2 py-1 rounded border border-slate-100">{animal.dam_id ?? 'Wild Hatch / Unknown'}</span>
+                </div>
+                <div className="pt-3 mt-1 border-t border-slate-100 flex justify-between items-center">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1.5">
+                    <ShieldAlert size={12} className="text-slate-400" /> Safety Rating
+                  </span>
+                  <span className={`text-[10px] font-black px-2.5 py-1 border rounded uppercase tracking-widest ${
+                    animal.hazard_rating === 'HIGH' ? 'bg-rose-50 text-rose-700 border-rose-200' :
+                    animal.hazard_rating === 'MEDIUM' ? 'bg-amber-50 text-amber-700 border-amber-200' :
+                    'bg-emerald-50 text-emerald-700 border-emerald-200'
+                  }`}>
+                    {animal.hazard_rating || 'LOW'}
+                  </span>
+                </div>
+                {animal.is_venomous && (
+                   <div className="bg-rose-100 text-rose-800 px-3 py-2 rounded-lg text-[10px] font-black flex items-center justify-center gap-2 uppercase tracking-widest mt-2 border border-rose-200">
+                     <AlertTriangle size={14} /> VENOMOUS SPECIES
+                   </div>
+                )}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+        {activeTab === 'medical' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+            <MedicalRecords animalId={animal.id} variant="quick-view" />
+          </div>
+        )}
+
+        {activeTab === 'husbandry' && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
+            <HusbandryLogs 
+              animalId={animal.id} 
+              weightUnit={animal.weight_unit || 'g'} 
+              animal={animal} 
+            />
+          </div>
+        )}
+      </div>
+
+      {/* EDIT OVERLAY MODAL ROUTER */}
+      {isEditModalOpen && (
+        <AnimalFormModal
+          isOpen={isEditModalOpen}
+          initialData={animal}
+          onClose={() => setIsEditModalOpen(false)}
+        />
+      )}
+      
     </div>
   );
 }

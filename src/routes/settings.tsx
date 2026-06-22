@@ -1,8 +1,8 @@
 import React from 'react';
-import { useNavigate, Outlet, useLocation, createFileRoute } from '@tanstack/react-router';
+import { Link, Outlet, createFileRoute, useLocation } from '@tanstack/react-router';
 import { 
   ShieldCheck, Users, FileText, 
-  List, Building, History, Activity
+  List, Building, History, Activity, Lock, Settings, ChevronRight
 } from 'lucide-react';
 import { useAuth } from '../lib/auth';
 
@@ -11,55 +11,78 @@ export const Route = createFileRoute('/settings')({
 });
 
 function SettingsLayout() {
-  const navigate = useNavigate({ from: Route.fullPath });
-  const location = useLocation();
   const { profile } = useAuth();
+  const location = useLocation();
+  const currentTab = location.pathname.split('/').pop() || 'organization';
   
-  // Role-based access control for tabs
-  const isManager = profile?.role === 'ADMIN' || profile?.role === 'MANAGER' || profile?.role === 'HR';
-  const isAdmin = profile?.role === 'ADMIN';
+  // 5-Tier Role-Based Access Control for Settings Navigation
+  const isSeniorOrAbove = ['SENIOR_KEEPER', 'DIRECTOR', 'ADMIN'].includes(profile?.role || '');
+  const isDirectorOrAdmin = ['DIRECTOR', 'ADMIN'].includes(profile?.role || '');
 
   const tabs = [
     { id: 'organization', label: 'Organisation Profile', icon: Building, show: true },
-    { id: 'directory', label: 'Directory', icon: Users, show: isManager },
+    { id: 'directory', label: 'Directory', icon: Users, show: isSeniorOrAbove },
     { id: 'lists', label: 'Operational Lists', icon: List, show: true },
     { id: 'health', label: 'System Health', icon: Activity, show: true },
-    { id: 'access', label: 'Access Control', icon: ShieldCheck, show: isAdmin },
-    { id: 'zla', label: 'ZLA Documents', icon: FileText, show: isManager },
+    { id: 'access', label: 'Access Control', icon: ShieldCheck, show: isDirectorOrAdmin },
+    { id: 'rbac', label: 'RBAC Matrix', icon: Lock, show: isDirectorOrAdmin },
+    { id: 'zla', label: 'ZLA Documents', icon: FileText, show: isSeniorOrAbove },
     { id: 'changelog', label: 'Changelog', icon: History, show: true },
   ];
 
   const visibleTabs = tabs.filter(t => t.show);
-  const currentTab = location.pathname.split('/').pop() || 'organization';
 
   return (
-    <div className="p-2 md:p-4 max-w-[1920px] mx-auto space-y-6 pb-24">
-      <h1 className="text-3xl font-bold text-slate-900">System Settings</h1>
+    <div className="flex h-[calc(100vh-64px)] bg-slate-50 font-sans">
       
-      <div className="flex flex-col md:flex-row gap-6">
-        {/* Sidebar Navigation (Identical RC6 UI) */}
-        <nav className="w-full md:w-64 space-y-1 shrink-0">
-          {visibleTabs.map((t) => (
-            <button
-              key={t.id}
-              onClick={() => navigate({ to: `/settings/${t.id}` })}
-              className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl text-sm font-medium transition-colors ${
-                currentTab === t.id 
-                  ? 'bg-blue-50 text-blue-700 shadow-sm border border-blue-100/50' 
-                  : 'text-slate-600 hover:bg-slate-100 border border-transparent'
-              }`}
-            >
-              <t.icon size={18} className={currentTab === t.id ? 'text-blue-600' : 'text-slate-400'} />
-              {t.label}
-            </button>
-          ))}
-        </nav>
+      {/* Sidebar Navigation (Matching Reports Module Structure) */}
+      <div className="w-72 bg-white border-r border-slate-200 flex flex-col shrink-0 relative z-10 shadow-[10px_0_15px_-5px_rgba(0,0,0,0.02)]">
+        
+        {/* Sidebar Header */}
+        <div className="p-6 border-b border-slate-100 bg-slate-50/50">
+          <div className="flex items-center gap-3 mb-1">
+            <div className="bg-emerald-100 p-2 rounded-lg border border-emerald-200">
+              <Settings className="w-5 h-5 text-emerald-600" />
+            </div>
+            <h2 className="text-xl font-black text-slate-900 tracking-tight">System Settings</h2>
+          </div>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Configuration & Security</p>
+        </div>
 
-        {/* Main Content Area */}
-        <div className="flex-1 bg-white rounded-2xl border border-slate-200 shadow-sm p-6 overflow-hidden">
+        {/* Sidebar Links */}
+        <nav className="flex-grow p-4 space-y-2 overflow-y-auto custom-scrollbar pb-24">
+          {visibleTabs.map((t) => {
+            const isActive = currentTab === t.id;
+            return (
+              <Link
+                key={t.id}
+                to={`/settings/${t.id}`}
+                className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 group border outline-none ${
+                  isActive 
+                    ? 'bg-emerald-600 border-emerald-600 text-white shadow-md' 
+                    : 'bg-white border-slate-200 text-slate-600 hover:border-emerald-300 hover:shadow-sm'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <t.icon size={16} className={isActive ? 'text-white' : 'text-slate-400 group-hover:text-emerald-500'} />
+                  <span className="text-[11px] font-black uppercase tracking-wide text-left line-clamp-1">
+                    {t.label}
+                  </span>
+                </div>
+                {isActive && <ChevronRight className="w-4 h-4 text-emerald-200 shrink-0" />}
+              </Link>
+            )
+          })}
+        </nav>
+      </div>
+
+      {/* Main Content Pane */}
+      <div className="flex-grow overflow-y-auto custom-scrollbar bg-slate-50">
+        <div className="p-6 lg:p-8 max-w-7xl mx-auto min-h-full">
           <Outlet />
         </div>
       </div>
+      
     </div>
   );
 }

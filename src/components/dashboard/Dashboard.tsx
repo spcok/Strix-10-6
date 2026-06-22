@@ -125,7 +125,7 @@ export default function Dashboard() {
             </div>
             
             {avatarUrl ? (
-              <img src={avatarUrl} alt={info.getValue()} className="w-8 h-8 rounded-full object-cover shrink-0 border border-slate-200 shadow-sm" />
+              <img src={avatarUrl || undefined} alt={info.getValue() || undefined} className="w-8 h-8 rounded-full object-cover shrink-0 border border-slate-200 shadow-sm" />
             ) : (
               <div className={`p-2 rounded-full shrink-0 shadow-sm ${isGroup ? 'bg-blue-50 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>
                 {isGroup ? <Users size={14} /> : <User size={14} />}
