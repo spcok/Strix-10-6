@@ -5,7 +5,9 @@ import {
   Loader2, Calendar, User 
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { formatWeightDisplay } from '../../services/weightUtils';
+
+// THE FIX: Pointing directly to your existing service file
+import { formatWeightDisplay } from '../../services/dailyLogService';
 
 interface HusbandryLogsProps {
   animalId: string;
@@ -23,7 +25,7 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryL
         .eq('animal_id', animalId)
         .eq('is_deleted', false)
         .order('log_date', { ascending: false })
-        .limit(50); // Restrict payload to 50 most recent records
+        .limit(50);
         
       if (error) throw error;
       return data;
@@ -49,19 +51,17 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryL
     );
   }
 
-  // Visual mapping for different log types
   const getLogConfig = (type: string) => {
     switch (type) {
       case 'WEIGHT': return { icon: Scale, color: 'text-blue-600', bg: 'bg-blue-50', border: 'border-blue-200' };
       case 'FEEDING': return { icon: Utensils, color: 'text-amber-600', bg: 'bg-amber-50', border: 'border-amber-200' };
       case 'ENVIRONMENTAL': return { icon: Thermometer, color: 'text-rose-600', bg: 'bg-rose-50', border: 'border-rose-200' };
-      default: return { icon: Eye, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' }; // OBSERVATION
+      default: return { icon: Eye, color: 'text-emerald-600', bg: 'bg-emerald-50', border: 'border-emerald-200' };
     }
   };
 
   return (
     <div className="space-y-4 animate-in fade-in duration-300">
-      
       <div className="flex items-center justify-between border-b border-slate-100 pb-3">
         <h3 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
           <ClipboardList className="text-emerald-600" size={18} /> Husbandry & Care Timeline
@@ -79,12 +79,10 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryL
           return (
             <div key={log.id} className="flex gap-4 p-4 bg-white rounded-xl border border-slate-200 shadow-sm hover:shadow-md transition-shadow">
               
-              {/* Type Indicator */}
               <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${config.bg} ${config.color} ${config.border}`}>
                 <Icon size={18} />
               </div>
 
-              {/* Payload Data */}
               <div className="flex-grow min-w-0">
                 <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-2 mb-2">
                   <div>
@@ -101,7 +99,6 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryL
                   </div>
                 </div>
 
-                {/* Conditional Data Rendering based on log type */}
                 {log.log_type === 'WEIGHT' && log.weight_grams !== null && (
                   <p className="text-lg font-black text-slate-900 mt-2">
                     {formatWeightDisplay(log.weight_grams, log.weight_unit || weightUnit)}
