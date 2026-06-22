@@ -4,10 +4,7 @@ import {
   ClipboardList, Scale, Utensils, Thermometer, Eye, 
   Loader2, Calendar, User 
 } from 'lucide-react';
-import { supabase } from '../../lib/supabase';
-
-// THE FIX: Pointing directly to your existing service file
-import { formatWeightDisplay } from '../../services/dailyLogService';
+import { dailyLogService } from '../../services/dailyLogService';
 
 interface HusbandryLogsProps {
   animalId: string;
@@ -15,20 +12,19 @@ interface HusbandryLogsProps {
   animal?: any;
 }
 
-export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryLogsProps) {
+// UI-Level formatting logic decoupled from services
+const formatWeight = (val: number | null | undefined, unit?: string) => {
+  if (val === null || val === undefined) return '--';
+  return `${val}${unit || 'g'}`;
+};
+
+export default function HusbandryLogs({ animalId, weightUnit = 'g', animal }: HusbandryLogsProps) {
   const { data: logs = [], isLoading } = useQuery({
     queryKey: ['daily_logs', animalId],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .eq('animal_id', animalId)
-        .eq('is_deleted', false)
-        .order('log_date', { ascending: false })
-        .limit(50);
-        
-      if (error) throw error;
-      return data;
+      // PRISTINE ARCHITECTURE: Utilizing your existing abstraction layer
+      // This automatically cascades parent mob logs down to the individual
+      return await dailyLogService.getCascadedLogs(animalId, animal?.parent_group_id);
     },
     enabled: !!animalId,
   });
@@ -101,7 +97,7 @@ export default function HusbandryLogs({ animalId, weightUnit = 'g' }: HusbandryL
 
                 {log.log_type === 'WEIGHT' && log.weight_grams !== null && (
                   <p className="text-lg font-black text-slate-900 mt-2">
-                    {formatWeightDisplay(log.weight_grams, log.weight_unit || weightUnit)}
+                    {formatWeight(log.weight_grams, log.weight_unit || weightUnit)}
                   </p>
                 )}
                 

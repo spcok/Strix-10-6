@@ -10,14 +10,20 @@ import { IUCNBadge } from './IUCNBadge';
 import AnimalFormModal from './AnimalFormModal';
 import MedicalRecords from '../medical/MedicalRecords';
 import HusbandryLogs from '../husbandry/HusbandryLogs';
-import { formatWeightDisplay } from '../../services/dailyLogService';
 
 export interface Props {
   animalId?: string;
   onBack?: () => void;
 }
 
-export default function AnimalProfile({ animalId, onBack }: Props) {
+// UI-Level formatting logic decoupled from services
+const formatWeight = (val: number | null | undefined, unit?: string) => {
+  if (val === null || val === undefined) return '--';
+  return `${val}${unit || 'g'}`;
+};
+
+// EXPORT FIX: Exported as a named function for strict module resolution...
+export function AnimalProfile({ animalId, onBack }: Props) {
   const params = useParams({ strict: false });
   const effectiveId = animalId || params.id || '';
   
@@ -56,22 +62,22 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
     <div className="max-w-5xl mx-auto space-y-6 pb-24 animate-in fade-in duration-300">
       
       {/* Navigation Layer */}
-      <div className="flex items-center gap-4 text-[10px] font-black uppercase tracking-widest text-slate-300">
+      <div className="flex items-center gap-4 text-[10px] font-black uppercase tracking-widest text-slate-400">
         {onBack ? (
-          <button onClick={onBack} className="flex items-center gap-2 hover:text-white transition-colors">
+          <button onClick={onBack} className="flex items-center gap-2 hover:text-slate-600 transition-colors">
             <ArrowLeft size={14} /> Back To Dashboard
           </button>
         ) : (
-          <Link to="/reports" className="flex items-center gap-2 hover:text-white transition-colors">
+          <Link to="/reports" className="flex items-center gap-2 hover:text-slate-600 transition-colors">
             <ArrowLeft size={14} /> Back To Dashboard
           </Link>
         )}
       </div>
 
-      {/* HERO CARD - Exact match to image_709bea.png */}
+      {/* HERO CARD */}
       <div className="bg-white rounded-3xl p-5 flex flex-col md:flex-row gap-8 shadow-xl">
         {/* Profile Image */}
-        <div className="w-full md:w-[280px] h-[280px] shrink-0 rounded-2xl overflow-hidden bg-slate-100 shadow-inner">
+        <div className="w-full md:w-[280px] h-[280px] shrink-0 rounded-2xl overflow-hidden bg-slate-100 shadow-inner border border-slate-200">
           <img 
             src={animal.profile_image_url || '/offline-media-fallback.svg'} 
             alt={animal.name} 
@@ -98,8 +104,8 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
             </button>
           </div>
 
-          <div className="mb-8">
-            <h1 className="text-4xl font-black text-slate-900 tracking-tight mb-2">{animal.name}</h1>
+          <div className="mb-8 pr-24">
+            <h1 className="text-4xl font-black text-slate-900 tracking-tight mb-2 truncate">{animal.name}</h1>
             <p className="text-[10px] font-bold text-slate-500 font-mono tracking-widest uppercase mb-1">
               ID: {animal.id.toUpperCase()}
             </p>
@@ -125,11 +131,11 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
         </div>
       </div>
 
-      {/* LOWER MATRIX - Exact match to image_709c25.png */}
+      {/* LOWER MATRIX */}
       <div className="bg-white rounded-3xl shadow-xl overflow-hidden flex flex-col min-h-[500px]">
         
         {/* Tab Header */}
-        <div className="flex border-b border-slate-100 px-2 pt-2 bg-slate-50 shrink-0">
+        <div className="flex border-b border-slate-100 px-2 pt-2 bg-slate-50 shrink-0 overflow-x-auto custom-scrollbar">
           {[
             { id: 'profile', label: 'Profile Matrix', icon: FileText },
             { id: 'medical', label: 'Medical', icon: Stethoscope },
@@ -140,7 +146,7 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
               <button
                 key={tab.id}
                 onClick={() => setActiveTab(tab.id as any)}
-                className={`flex items-center gap-2 px-6 py-4 text-[11px] font-black uppercase tracking-widest transition-all border-b-2 ${
+                className={`flex items-center gap-2 px-6 py-4 text-[11px] font-black uppercase tracking-widest transition-all border-b-2 whitespace-nowrap ${
                   isActive 
                     ? 'border-emerald-500 text-emerald-600 bg-white rounded-t-xl shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.02)]' 
                     : 'border-transparent text-slate-400 hover:text-slate-600 hover:bg-slate-100/50 rounded-t-xl'
@@ -171,7 +177,7 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
                      <div className="text-sm font-bold text-rose-800 space-y-2">
                        {Array.isArray(animal.critical_husbandry_notes) 
                          ? animal.critical_husbandry_notes.map((n, i) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n}</span></p>)
-                         : animal.critical_husbandry_notes.split('\n').map((n: string, i: number) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n.replace(/^- /, '')}</span></p>)
+                         : String(animal.critical_husbandry_notes).split('\n').map((n, i) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n.replace(/^- /, '')}</span></p>)
                        }
                      </div>
                   ) : (
@@ -189,13 +195,13 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
                     <div className="flex justify-between items-center border-b border-slate-200 pb-2">
                       <span className="text-sm font-bold text-slate-500">Flying Weight:</span>
                       <span className="text-sm font-black text-slate-900">
-                        {animal.flying_weight !== null ? formatWeightDisplay(animal.flying_weight, animal.weight_unit) : '--'}
+                        {formatWeight(animal.flying_weight, animal.weight_unit)}
                       </span>
                     </div>
                     <div className="flex justify-between items-center">
                       <span className="text-sm font-bold text-slate-500">Winter Weight:</span>
                       <span className="text-sm font-black text-slate-900">
-                        {animal.winter_weight !== null ? formatWeightDisplay(animal.winter_weight, animal.weight_unit) : '--'}
+                        {formatWeight(animal.winter_weight, animal.weight_unit)}
                       </span>
                     </div>
                   </div>
@@ -228,7 +234,7 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
                   )}
                 </div>
 
-                {/* Environmental Block (Added to fulfill "as much info as possible") */}
+                {/* Environmental Block */}
                 <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
                   <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
                     <Thermometer size={16} className="text-blue-500" />
@@ -265,11 +271,11 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
                   <div className="space-y-1">
                     <div className="flex justify-between">
                       <span className="text-[10px] font-bold text-slate-400">Sire ID:</span>
-                      <span className="text-[10px] font-mono text-slate-800">{animal.sire_id || 'Unknown'}</span>
+                      <span className="text-[10px] font-mono text-slate-800 line-clamp-1 text-right">{animal.sire_id || 'Unknown'}</span>
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex justify-between mt-1">
                       <span className="text-[10px] font-bold text-slate-400">Dam ID:</span>
-                      <span className="text-[10px] font-mono text-slate-800">{animal.dam_id || 'Unknown'}</span>
+                      <span className="text-[10px] font-mono text-slate-800 line-clamp-1 text-right">{animal.dam_id || 'Unknown'}</span>
                     </div>
                   </div>
                 </div>
@@ -295,3 +301,6 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
     </div>
   );
 }
+
+// EXPORT FIX: ...and simultaneously exported as the default fallback.
+export default AnimalProfile;
