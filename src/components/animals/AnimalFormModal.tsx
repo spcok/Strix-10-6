@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useForm, FieldApi } from '@tanstack/react-form';
+import { useForm } from '@tanstack/react-form';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { X, Save, Loader2, AlertCircle, Users, User } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
@@ -23,19 +23,26 @@ const TABS = [
 type TabId = typeof TABS[number]['id'];
 
 // ------------------------------------------------------------------
-// EXTRACTED COMPONENTS: Prevents DOM destruction & unmounting on keystroke
+// EXTRACTED COMPONENTS: Now equipped with Real-Time Validation & Disabled States
 // ------------------------------------------------------------------
-function FormInput({ field, label, type = 'text', placeholder }: { field: any; label: string; type?: string; placeholder?: string }) {
+function FormInput({ field, label, type = 'text', placeholder, disabled = false }: { field: any; label: string; type?: string; placeholder?: string; disabled?: boolean }) {
+  const hasError = field.state.meta.errors.length > 0 && field.state.meta.isTouched;
+  
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
+      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : 'text-slate-500'}`}>{label}</label>
       {type === 'textarea' ? (
         <textarea
           value={field.state.value}
           onBlur={field.handleBlur}
           onChange={(e) => field.handleChange(e.target.value)}
           placeholder={placeholder}
-          className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm h-24 custom-scrollbar resize-none"
+          disabled={disabled}
+          className={`w-full p-2.5 rounded-xl outline-none transition-all text-sm font-medium shadow-sm h-24 custom-scrollbar resize-none ${
+            disabled ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' :
+            hasError ? 'bg-rose-50 border-rose-300 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 text-rose-900' : 
+            'bg-white border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900'
+          }`}
         />
       ) : (
         <input
@@ -44,27 +51,40 @@ function FormInput({ field, label, type = 'text', placeholder }: { field: any; l
           onBlur={field.handleBlur}
           onChange={(e) => field.handleChange(type === 'number' ? (e.target.value === '' ? '' : Number(e.target.value)) : e.target.value)}
           placeholder={placeholder}
-          className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm"
+          disabled={disabled}
+          className={`w-full p-2.5 rounded-xl outline-none transition-all text-sm font-medium shadow-sm ${
+            disabled ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' :
+            hasError ? 'bg-rose-50 border-rose-300 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 text-rose-900' : 
+            'bg-white border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900'
+          }`}
         />
       )}
+      {hasError && <span className="text-[10px] font-bold text-rose-500 mt-0.5">{field.state.meta.errors.join(', ')}</span>}
     </div>
   );
 }
 
-function FormSelect({ field, label, options }: { field: any; label: string; options: { value: string, label: string }[] }) {
+function FormSelect({ field, label, options, disabled = false }: { field: any; label: string; options: { value: string, label: string }[]; disabled?: boolean }) {
+  const hasError = field.state.meta.errors.length > 0 && field.state.meta.isTouched;
   return (
     <div className="flex flex-col gap-1.5">
-      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">{label}</label>
+      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : 'text-slate-500'}`}>{label}</label>
       <select
         value={field.state.value}
         onBlur={field.handleBlur}
         onChange={(e) => field.handleChange(e.target.value)}
-        className="w-full p-2.5 bg-white border border-slate-200 rounded-xl focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900 outline-none transition-all text-sm font-medium shadow-sm"
+        disabled={disabled}
+        className={`w-full p-2.5 rounded-xl outline-none transition-all text-sm font-medium shadow-sm ${
+          disabled ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' :
+          hasError ? 'bg-rose-50 border-rose-300 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 text-rose-900' : 
+          'bg-white border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900'
+        }`}
       >
         {options.map((opt) => (
           <option key={opt.value} value={opt.value}>{opt.label}</option>
         ))}
       </select>
+      {hasError && <span className="text-[10px] font-bold text-rose-500 mt-0.5">{field.state.meta.errors.join(', ')}</span>}
     </div>
   );
 }
@@ -101,16 +121,10 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     }
   });
 
-  // ENTERPRISE FIX: Corrected category matching and order logic
   const { data: locations = [] } = useQuery({
     queryKey: ['operational_lists', 'location'],
     queryFn: async () => {
-      const { data, error } = await supabase
-        .from('operational_lists')
-        .select('id, name')
-        .eq('category', 'location')
-        .eq('is_deleted', false)
-        .order('name');
+      const { data, error } = await supabase.from('operational_lists').select('id, name').eq('category', 'location').eq('is_deleted', false).order('name');
       if (error) throw error;
       return data;
     }
@@ -135,14 +149,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         if (error) throw error;
 
         if (oldLocation !== newLocation && newLocation !== undefined) {
-           const { error: moveError } = await supabase.from('internal_movements').insert([{
-              animal_id: initialData.id,
-              from_location: oldLocation || null,
-              to_location: newLocation,
-              movement_date: new Date().toISOString(),
-              reason: 'Updated via Profile UI'
-           }]);
-           if (moveError) console.error("[Audit Engine] Failed to log internal movement:", moveError);
+           await supabase.from('internal_movements').insert([{ animal_id: initialData.id, from_location: oldLocation || null, to_location: newLocation, movement_date: new Date().toISOString(), reason: 'Updated via Profile UI' }]);
         }
         return data;
       } else {
@@ -150,39 +157,13 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         if (error) throw error;
 
         if (payload.location) {
-           await supabase.from('internal_movements').insert([{
-              animal_id: data.id,
-              from_location: null,
-              to_location: payload.location,
-              movement_date: new Date().toISOString(),
-              reason: 'Initial System Placement'
-           }]);
+           await supabase.from('internal_movements').insert([{ animal_id: data.id, from_location: null, to_location: payload.location, movement_date: new Date().toISOString(), reason: 'Initial System Placement' }]);
         }
         return data;
       }
     },
-    onMutate: async (newAnimal) => {
-      await queryClient.cancelQueries({ queryKey: ['animals', 'dashboard'] });
-      const previousAnimals = queryClient.getQueryData<Animal[]>(['animals', 'dashboard']);
-      
-      queryClient.setQueryData(['animals', 'dashboard'], (old: Animal[] | undefined) => {
-        if (initialData?.id) {
-          return old?.map((a) => a.id === initialData.id ? { ...a, ...newAnimal } : a) || [];
-        } else {
-          const optimisticRecord = { ...newAnimal, id: crypto.randomUUID(), status: newAnimal.status || 'ON_DISPLAY' } as Animal;
-          return [...(old || []), optimisticRecord];
-        }
-      });
-      return { previousAnimals };
-    },
-    onError: (err, newAnimal, context) => {
-      console.error('Failed to sync animal record:', err);
-      if (context?.previousAnimals) {
-        queryClient.setQueryData(['animals', 'dashboard'], context.previousAnimals);
-      }
-    },
     onSettled: () => {
-      queryClient.invalidateQueries({ queryKey: ['animals', 'dashboard'] });
+      queryClient.invalidateQueries({ queryKey: ['animals'] });
       queryClient.invalidateQueries({ queryKey: ['animal-groups'] });
     },
   });
@@ -255,6 +236,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
 
         const unit = rawPayload.weight_unit;
         
+        // Smart Data Cleanup on Save
+        if (rawPayload.has_no_id) {
+          rawPayload.microchip_id = '';
+          rawPayload.ring_number = '';
+        }
+        
         const payload: Partial<Animal> = {
           record_type: rawPayload.record_type,
           parent_group_id: rawPayload.record_type === 'GROUP' || rawPayload.parent_group_id === '' ? null : rawPayload.parent_group_id,
@@ -310,6 +297,17 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     },
   });
 
+  // UX UPGRADE: Accidental Closure Protection
+  const handleSafeClose = () => {
+    if (form.state.isDirty) {
+      if (window.confirm("You have unsaved changes. Are you sure you want to discard them?")) {
+        onClose();
+      }
+    } else {
+      onClose();
+    }
+  };
+
   if (!isOpen) return null;
 
   return (
@@ -318,12 +316,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50 shrink-0">
           <div>
-            <h2 className="text-lg font-bold text-slate-900 tracking-tight">
-              {initialData ? 'Edit Database Record' : 'Add New Record'}
+            <h2 className="text-lg font-black text-slate-900 tracking-tight uppercase">
+              {initialData ? 'Edit Database Record' : 'Provision New Animal'}
             </h2>
-            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-0.5">StrixOS Database Matrix</p>
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mt-0.5">StrixOS Data Matrix</p>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors">
+          <button onClick={handleSafeClose} className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors">
             <X size={20} />
           </button>
         </div>
@@ -355,6 +353,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
             
             <div className={activeTab === 'core' ? 'block' : 'hidden'}>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+                
                 <div className="sm:col-span-2 p-5 bg-slate-50 border border-slate-200 rounded-2xl flex flex-col gap-4">
                   <form.Field name="record_type">
                     {(field) => (
@@ -364,7 +363,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                           <button type="button" onClick={() => field.handleChange('INDIVIDUAL')} className={`flex-1 flex justify-center items-center gap-2 py-2.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${field.state.value === 'INDIVIDUAL' ? 'bg-emerald-500 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
                             <User size={14} /> Individual
                           </button>
-                          <button type="button" onClick={() => field.handleChange('GROUP')} className={`flex-1 flex justify-center items-center gap-2 py-2.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${field.state.value === 'GROUP' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
+                          <button type="button" onClick={() => { field.handleChange('GROUP'); form.setFieldValue('gender', ''); }} className={`flex-1 flex justify-center items-center gap-2 py-2.5 rounded-lg text-xs font-bold uppercase tracking-widest transition-all ${field.state.value === 'GROUP' ? 'bg-blue-500 text-white shadow-sm' : 'text-slate-500 hover:bg-slate-50'}`}>
                             <Users size={14} /> Parent Group
                           </button>
                         </div>
@@ -381,29 +380,47 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                   </form.Subscribe>
                 </div>
 
-                <form.Field name="name">{(field) => <FormInput field={field as any} label="Animal / Group Name" placeholder="e.g. Apollo" />}</form.Field>
+                {/* UX UPGRADE: Real-Time Validation on Name and Species */}
+                <form.Field 
+                  name="name"
+                  validators={{ onChange: ({ value }) => !value ? 'Name is required' : undefined }}
+                >
+                  {(field) => <FormInput field={field as any} label="Animal / Group Name *" placeholder="e.g. Apollo" />}
+                </form.Field>
                 
-                {/* ENTERPRISE FIX: Mapped correctly to save the Location 'name' string so Internal Movements grids don't display a UUID */}
                 <form.Field name="location">
                   {(field) => (
                     <FormSelect 
                       field={field as any} 
                       label="Current Enclosure / Location" 
-                      options={[
-                        { value: '', label: '-- Unassigned --' }, 
-                        ...locations.map((l: any) => ({ value: l.name, label: l.name }))
-                      ]} 
+                      options={[{ value: '', label: '-- Unassigned --' }, ...locations.map((l: any) => ({ value: l.name, label: l.name }))]} 
                     />
                   )}
                 </form.Field>
                 
                 <form.Field name="census_count">{(field) => <FormInput field={field as any} label="Census Count (Headcount)" type="number" />}</form.Field>
-                <form.Field name="species">{(field) => <FormInput field={field as any} label="Common Species" placeholder="e.g. Golden Eagle" />}</form.Field>
+                
+                <form.Field 
+                  name="species"
+                  validators={{ onChange: ({ value }) => !value ? 'Species is required' : undefined }}
+                >
+                  {(field) => <FormInput field={field as any} label="Common Species *" placeholder="e.g. Golden Eagle" />}
+                </form.Field>
+                
                 <form.Field name="latin_name">{(field) => <FormInput field={field as any} label="Latin / Scientific Name" placeholder="e.g. Aquila chrysaetos" />}</form.Field>
                 
                 <form.Field name="category">{(field) => <FormSelect field={field as any} label="Category" options={[{ value: 'OWL', label: 'Owl' }, { value: 'RAPTOR', label: 'Raptor' }, { value: 'MAMMAL', label: 'Mammal' }, { value: 'EXOTIC', label: 'Exotic' }]} />}</form.Field>
                 <form.Field name="status">{(field) => <FormSelect field={field as any} label="Initial Status" options={[{ value: 'ON_DISPLAY', label: 'On Display' }, { value: 'OFF_DISPLAY', label: 'Off Display' }, { value: 'QUARANTINE', label: 'Quarantine / Isolated' }, { value: 'MEDICAL', label: 'Medical - Off Display' }, { value: 'OFFSITE', label: 'Stored Offsite' }]} />}</form.Field>
-                <form.Field name="gender">{(field) => <FormSelect field={field as any} label="Gender" options={[{ value: '', label: 'Unknown / Mixed / Not Recorded' }, { value: 'M', label: 'Male' }, { value: 'F', label: 'Female' }, { value: 'U', label: 'Unsexed' }]} />}</form.Field>
+                
+                {/* UX UPGRADE: Smart Gender Interlocking for Groups */}
+                <form.Subscribe selector={state => state.values.record_type}>
+                  {(recordType) => (
+                    <form.Field name="gender">
+                      {(field) => <FormSelect field={field as any} label="Gender" disabled={recordType === 'GROUP'} options={[{ value: '', label: 'Unknown / Mixed / Not Recorded' }, { value: 'M', label: 'Male' }, { value: 'F', label: 'Female' }, { value: 'U', label: 'Unsexed' }]} />}
+                    </form.Field>
+                  )}
+                </form.Subscribe>
+
                 <form.Field name="date_of_birth">{(field) => <FormInput field={field as any} label="Date of Birth / Est. Origin" type="date" />}</form.Field>
 
                 <div className="sm:col-span-2 pt-4 border-t border-slate-100">
@@ -423,11 +440,21 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
 
             <div className={activeTab === 'id' ? 'block' : 'hidden'}>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                <form.Field name="ring_number">{(field) => <FormInput field={field as any} label="Ring Number" placeholder="e.g. A10-992" />}</form.Field>
-                <form.Field name="microchip_id">{(field) => <FormInput field={field as any} label="Microchip ID" />}</form.Field>
+                
+                {/* UX UPGRADE: Smart ID Field Interlocking */}
+                <form.Subscribe selector={state => state.values.has_no_id}>
+                  {(hasNoId) => (
+                    <>
+                      <form.Field name="ring_number">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Ring Number" placeholder="e.g. A10-992" />}</form.Field>
+                      <form.Field name="microchip_id">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Microchip ID" />}</form.Field>
+                    </>
+                  )}
+                </form.Subscribe>
                 
                 <div className="sm:col-span-2 pb-4 border-b border-slate-100">
-                  <form.Field name="has_no_id">{(field) => <FormCheckbox field={field as any} label="Entity holds no formal identification" />}</form.Field>
+                  <form.Field name="has_no_id">
+                    {(field) => <FormCheckbox field={field as any} label="Entity holds no formal identification (Disables ID fields)" />}
+                  </form.Field>
                 </div>
                 
                 <form.Field name="flying_weight">{(field) => <FormInput field={field as any} label="Flying / Summer Weight" type="number" />}</form.Field>
@@ -461,7 +488,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
             <div className={activeTab === 'safety' ? 'block' : 'hidden'}>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
                 <form.Field name="hazard_rating">{(field) => <FormSelect field={field as any} label="Hazard Rating" options={[{ value: 'LOW', label: 'Low Risk' }, { value: 'MEDIUM', label: 'Medium Risk' }, { value: 'HIGH', label: 'High Risk - DWA' }]} />}</form.Field>
-                <form.Field name="red_list_status">{(field) => <FormSelect field={field as any} label="IUCN Red List Status" options={[{ value: 'NE', label: 'Not Evaluated (NE)' }, { value: 'DD', label: 'Data Deficient (DD)' }, { value: 'LC', label: 'Least Concern (LC)' }, { value: 'NT', label: 'Near Threatened (NT)' }, { value: 'VU', label: 'Vulnerable (VU)' }, { value: 'EN', label: 'Endangered (EN)' }, { value: 'CR', label: 'Critically Endangered (CR)' }, { value: 'EW', label: 'Extinct in the Wild (EW)' }]} />}</form.Field>
+                <form.Field name="red_list_status">{(field) => <FormSelect field={field as any} label="IUCN Red List Status" options={[{ value: 'NE', label: 'Not Evaluated (NE)' }, { value: 'DD', label: 'Data Deficient (DD)' }, { value: 'LC', label: 'Least Concern (LC)' }, { value: 'NT', label: 'Near Threatened (NT)' }, { value: 'VU', label: 'Vulnerable (VU)' }, { value: 'EN', label: 'Endangered (EN)' }, { value: 'CR', label: 'Critically Endangered (CR)' }, { value: 'EW', label: 'Extinct in the Wild (EW)' }, { value: 'EX', label: 'Extinct (EX)' }]} />}</form.Field>
                 <div className="sm:col-span-2 pb-4 border-b border-slate-100">
                   <form.Field name="is_venomous">{(field) => <FormCheckbox field={field as any} label="Species is Venomous" />}</form.Field>
                 </div>
@@ -490,19 +517,16 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 <div className="sm:col-span-2">
                   <form.Field name="lineage_unknown">{(field) => <FormCheckbox field={field as any} label="Lineage/Parentage is Unknown" />}</form.Field>
                 </div>
+                
                 <form.Subscribe selector={(state) => state.values.lineage_unknown}>
                   {(lineage_unknown) => (
                     <>
-                      <form.Field name="sire_id">{(field) => <FormInput field={field as any} label="Sire UUID" />}</form.Field>
-                      <form.Field name="dam_id">{(field) => <FormInput field={field as any} label="Dam UUID" />}</form.Field>
-                      {lineage_unknown && (
-                        <div className="sm:col-span-2 mt-[-10px] text-[10px] text-amber-600 font-bold tracking-wide">
-                          Warning: Parentage fields should be ignored if lineage is marked unknown.
-                        </div>
-                      )}
+                      <form.Field name="sire_id">{(field) => <FormInput field={field as any} disabled={lineage_unknown} label="Sire UUID" />}</form.Field>
+                      <form.Field name="dam_id">{(field) => <FormInput field={field as any} disabled={lineage_unknown} label="Dam UUID" />}</form.Field>
                     </>
                   )}
                 </form.Subscribe>
+
                 <div className="sm:col-span-2">
                   <form.Field name="description">{(field) => <FormInput field={field as any} label="General Description / Public Notes" type="textarea" />}</form.Field>
                 </div>
@@ -518,7 +542,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
             {activeTab} parameters active
           </div>
           <div className="flex items-center gap-3 w-full sm:w-auto">
-            <button type="button" onClick={onClose} className="w-full sm:w-auto px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">
+            <button type="button" onClick={handleSafeClose} className="w-full sm:w-auto px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">
               Cancel
             </button>
             <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>

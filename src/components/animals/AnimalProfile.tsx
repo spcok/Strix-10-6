@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query';
 import { 
   FileText, Stethoscope, ClipboardList, ArrowLeft, ShieldAlert, 
   Thermometer, Scale, AlertTriangle, GitMerge, Edit2, Archive, 
-  MapPin, Hash, Info, Lock
+  MapPin, Hash, Info, Lock 
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { IUCNBadge } from './IUCNBadge';
@@ -36,7 +36,6 @@ export interface Props {
 }
 
 export default function AnimalProfile({ animalId, onBack }: Props) {
-  // Use TanStack Router's dynamic param (fallback to prop if nested)
   const params = useParams({ strict: false });
   const effectiveId = animalId || params.id || '';
   
@@ -45,7 +44,6 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
 
   // ------------------------------------------------------------------
   // MODERNIZED TANSTACK QUERY v5
-  // Replaces the opaque 'useAnimalProfileData' legacy hook
   // ------------------------------------------------------------------
   const { data: animal, isLoading } = useQuery({
     queryKey: ['animal_profile', effectiveId],
@@ -62,7 +60,7 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
       return data;
     },
     enabled: !!effectiveId,
-    staleTime: 1000 * 60 * 5, // Cache profile for 5 minutes before background refetch
+    staleTime: 1000 * 60 * 5, 
   });
 
   if (isLoading) {
@@ -106,11 +104,12 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
         <div className="absolute top-6 right-6 flex items-center gap-3 z-20">
           <div className="flex gap-1.5 shadow-sm rounded-lg overflow-hidden">
             {animal.is_boarding && (
-              <span className="px-2.5 py-1.5 bg-amber-50 text-amber-700 text-[9px] font-black border border-amber-200 uppercase tracking-widest">Boarding</span>
+              <span className="px-2.5 py-1.5 bg-amber-50 text-amber-700 text-[9px] font-black border border-amber-200 uppercase tracking-widest flex items-center">Boarding</span>
             )}
             {animal.is_deleted && (
-              <span className="px-2.5 py-1.5 bg-rose-50 text-rose-700 text-[9px] font-black border border-rose-200 uppercase tracking-widest">Archived</span>
+              <span className="px-2.5 py-1.5 bg-rose-50 text-rose-700 text-[9px] font-black border border-rose-200 uppercase tracking-widest flex items-center">Archived</span>
             )}
+            {/* Offline-Safe IUCN Badge Mount */}
             <IUCNBadge status={animal.red_list_status} />
           </div>
           <div className="flex items-center gap-1 border-l border-slate-200 pl-3">
@@ -146,8 +145,8 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
         {/* Right Hand: High-Density Telemetry Matrix */}
         <div className="flex-grow flex flex-col justify-between pt-2">
           <div>
-            <div className="space-y-1 mb-6">
-              <h1 className="text-4xl font-black text-slate-900 tracking-tight leading-none">{animal.name}</h1>
+            <div className="space-y-1 mb-6 pr-48">
+              <h1 className="text-4xl font-black text-slate-900 tracking-tight leading-none truncate">{animal.name}</h1>
               {animal.latin_name && (
                 <p className="text-sm font-bold text-slate-400 italic tracking-wide">{animal.latin_name}</p>
               )}
@@ -191,7 +190,7 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
               </div>
               <div>
                 <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 block mb-1">Disposition Status</span>
-                <span className="text-sm font-bold text-slate-800">{animal.status || 'Active Collection'}</span>
+                <span className="text-sm font-bold text-slate-800">{animal.status?.replace('_', ' ') || 'Active Collection'}</span>
               </div>
             </div>
           </div>
@@ -235,14 +234,13 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
             
             {/* CRITICAL HUSBANDRY NOTES PANEL */}
-            <div className="bg-rose-50/50 border border-rose-200 rounded-2xl p-6 md:col-span-2 xl:col-span-3">
+            <div className="bg-rose-50/50 border border-rose-200 rounded-2xl p-6 md:col-span-2 xl:col-span-3 shadow-sm">
               <div className="flex items-center gap-3 mb-4 border-b border-rose-100 pb-3">
                 <AlertTriangle className="text-rose-600" size={20} />
                 <h3 className="text-sm font-black text-rose-900 uppercase tracking-widest">Critical Husbandry Alerts</h3>
               </div>
               {animal.critical_husbandry_notes ? (
                 <div className="text-sm font-bold text-rose-800 leading-relaxed whitespace-pre-wrap">
-                  {/* Assumes the DB stores this as text or JSON array. If JSON array, map it. If text, render it. */}
                   {Array.isArray(animal.critical_husbandry_notes) 
                     ? animal.critical_husbandry_notes.map((n, i) => <p key={i} className="flex gap-2"><span className="text-rose-500">•</span>{n}</p>)
                     : animal.critical_husbandry_notes}
@@ -336,12 +334,14 @@ export default function AnimalProfile({ animalId, onBack }: Props) {
           </div>
         )}
 
+        {/* MEDICAL RECORDS INTEGRATION */}
         {activeTab === 'medical' && (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
             <MedicalRecords animalId={animal.id} variant="quick-view" />
           </div>
         )}
 
+        {/* HUSBANDRY LOGS INTEGRATION */}
         {activeTab === 'husbandry' && (
           <div className="bg-white border border-slate-200 rounded-2xl p-6 shadow-sm">
             <HusbandryLogs 
