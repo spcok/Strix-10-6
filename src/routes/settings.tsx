@@ -56,7 +56,7 @@ function SettingsLayout() {
             return (
               <Link
                 key={t.id}
-                to={`/settings/${t.id}`}
+                to={`/settings/${t.id}` as any}
                 className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 group border outline-none ${
                   isActive 
                     ? 'bg-emerald-600 border-emerald-600 text-white shadow-md' 

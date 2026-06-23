@@ -26,7 +26,7 @@ const formatWeight = (val: number | null | undefined, unit?: string) => {
 
 // Dual Export: Resolves the "does not provide an export named..." error
 export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onClose }: Props) {
-  const params = useParams({ strict: false });
+  const params = useParams({ strict: false }) as Record<string, any>;
   const effectiveId = passedAnimal?.id || animalId || id || params.id || '';
   const handleClose = onClose || onBack;
   

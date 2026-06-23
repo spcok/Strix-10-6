@@ -1,9 +1,10 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { Animal } from '../../types';
-import { Users, Scale, X, MapPin, Activity, ListOrdered, FileText } from 'lucide-react';
+import { Users, Scale, X, MapPin, Activity, ListOrdered, FileText, Edit2 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
+import AnimalFormModal from './AnimalFormModal';
 
 interface MobProfileProps {
   mob: Animal;
@@ -11,6 +12,7 @@ interface MobProfileProps {
 }
 
 export function MobProfile({ mob, onClose }: MobProfileProps) {
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   
   // Fetch all individuals belonging to this mob
   const { data: members = [], isLoading: isMembersLoading } = useQuery({
@@ -90,9 +92,14 @@ export function MobProfile({ mob, onClose }: MobProfileProps) {
               <p className="text-xs font-bold text-slate-500 uppercase tracking-widest mt-0.5">{mob.species || 'Unknown Species'}</p>
             </div>
           </div>
-          <button onClick={onClose} className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-colors">
-            <X size={24} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={() => setIsEditModalOpen(true)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors" title="Edit Mob Record">
+              <Edit2 size={20} />
+            </button>
+            <button onClick={onClose} className="p-2 text-slate-400 hover:text-rose-500 hover:bg-rose-50 rounded-xl transition-colors" title="Close Profile">
+              <X size={24} />
+            </button>
+          </div>
         </div>
 
         {/* Scrollable Body */}
@@ -118,11 +125,21 @@ export function MobProfile({ mob, onClose }: MobProfileProps) {
               </div>
             </div>
 
-            <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center gap-4">
-              <div className="p-3 bg-slate-100 text-slate-600 rounded-xl"><MapPin size={20} /></div>
-              <div>
-                <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest">Enclosure Base</p>
-                <p className="text-sm font-bold text-slate-900 mt-1 truncate">{mob.location || 'Unassigned'}</p>
+            {/* QUICK EDIT LOCATION CARD */}
+            <div 
+              onClick={() => setIsEditModalOpen(true)}
+              className="bg-white p-5 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-between gap-4 cursor-pointer group hover:border-blue-300 hover:shadow-md transition-all"
+              title="Click to reassign Enclosure Base"
+            >
+              <div className="flex items-center gap-4">
+                <div className="p-3 bg-slate-100 text-slate-600 rounded-xl group-hover:bg-blue-50 group-hover:text-blue-600 transition-colors"><MapPin size={20} /></div>
+                <div>
+                  <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest group-hover:text-blue-500 transition-colors">Enclosure Base</p>
+                  <p className="text-sm font-bold text-slate-900 mt-1 truncate">{mob.location || 'Unassigned'}</p>
+                </div>
+              </div>
+              <div className="text-slate-300 opacity-0 group-hover:opacity-100 group-hover:text-blue-500 transition-all">
+                <Edit2 size={16} />
               </div>
             </div>
           </div>
@@ -187,6 +204,16 @@ export function MobProfile({ mob, onClose }: MobProfileProps) {
 
         </div>
       </div>
+
+      {isEditModalOpen && (
+        <AnimalFormModal 
+          isOpen={isEditModalOpen} 
+          onClose={() => setIsEditModalOpen(false)} 
+          initialData={mob} 
+        />
+      )}
     </div>
   );
 }
+
+export default MobProfile;
