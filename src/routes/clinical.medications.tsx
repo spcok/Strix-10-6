@@ -17,7 +17,7 @@ export const Route = createFileRoute('/clinical/medications')({
 
 function MedicationsModule() {
   const queryClient = useQueryClient();
-  const { user, profile } = useAuth();
+  const { user } = useAuth();
   
   const [activeTab, setActiveTab] = useState<'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY'>('DIGITAL_MAR');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -46,12 +46,13 @@ function MedicationsModule() {
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
+  // FIX: Added date_of_birth and status to the fetch query for the DOCX Age/Quarantine checks
   const { data: prescriptions = [], isLoading: loadingRx } = useQuery({
     queryKey: ['prescriptions', 'active'],
     queryFn: async () => {
       const { data, error } = await supabase
         .from('prescriptions')
-        .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements)')
+        .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements, date_of_birth, status)')
         .eq('status', 'ACTIVE')
         .order('start_date', { ascending: false });
       if (error) throw error;
@@ -70,12 +71,16 @@ function MedicationsModule() {
     setIsPrescriptionModalOpen(true);
   };
 
-  // The new DOCX Print Handler
   const handlePrintUnifiedMar = async (rx: any, setLoading: (b: boolean) => void) => {
     setLoading(true);
     try {
       const patientPrescriptions = prescriptions.filter(p => p.animal_id === rx.animal_id);
-      await marExportService.exportUnifiedMAR(rx.animals, patientPrescriptions, profile?.name || 'Staff', profile?.id || '');
+      await marExportService.exportUnifiedMAR(
+        rx.animals, 
+        patientPrescriptions, 
+        user?.name || 'Staff', 
+        user?.id || 'Unknown-ID'
+      );
     } catch (error) {
       console.error(error);
       alert("Failed to generate DOCX MAR chart. Ensure you are online to fetch the logo.");
@@ -85,15 +90,14 @@ function MedicationsModule() {
   };
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      
+    <div className="max-w-7xl mx-auto space-y-6 pb-24">
       {!isOnline && (
         <div className="bg-rose-600 text-white p-4 rounded-xl shadow-lg flex items-center justify-between animate-in fade-in slide-in-from-top-4">
           <div className="flex items-center gap-3">
             <WifiOff size={20} />
             <div>
               <p className="font-black uppercase tracking-widest text-xs">Clinical Network Disconnected</p>
-              <p className="text-sm font-medium text-rose-100">Medication administration is locked to prevent double-dosing.</p>
+              <p className="text-sm font-medium text-rose-100">Medication administration is locked to prevent double-dosing. Please reconnect to WiFi.</p>
             </div>
           </div>
         </div>
@@ -104,12 +108,8 @@ function MedicationsModule() {
           <h1 className="text-2xl font-black text-slate-900 tracking-tight">Clinical Dispensary</h1>
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Prescription Management & Digital MAR</p>
         </div>
-        
         <div className="flex gap-2">
-          <button 
-            onClick={handleOpenNewOrder}
-            className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold uppercase tracking-widest text-[10px] hover:bg-blue-700 shadow-[0_0_15px_rgba(37,99,235,0.2)] transition-all"
-          >
+          <button onClick={handleOpenNewOrder} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold uppercase tracking-widest text-[10px] hover:bg-blue-700 shadow-[0_0_15px_rgba(37,99,235,0.2)] transition-all">
             <Pill size={14} /> Provision Order
           </button>
         </div>

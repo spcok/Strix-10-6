@@ -61,7 +61,6 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
   const { user } = useAuth();
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // FIX: Fetch animals that are not archived to populate the list correctly
   const { data: animals = [] } = useQuery({
     queryKey: ['animals', 'active'],
     queryFn: async () => {
@@ -97,7 +96,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
       dosage: initialData?.dosage || '',
       route: initialData?.route || 'PO',
       frequency: initialData?.frequency || 'SID',
-      is_prn: initialData?.is_prn || false,
+      is_prn: false, // Force false, stripped from UI
       indication: initialData?.indication || '',
       special_instructions: initialData?.special_instructions || '',
       start_date: initialData?.start_date || new Date().toISOString().split('T')[0],
@@ -109,11 +108,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
       setSaveError(null);
       try {
         const payload = { ...value } as any;
-
-        // Clean empty optional dates
         if (payload.end_date === '') payload.end_date = null;
-        
-        // FIX: If it's not a formal prescription, explicitly nullify the vet fields in the database
         if (payload.order_type !== 'PRESCRIPTION') {
           payload.prescribing_vet_name = null;
           payload.prescribing_clinic = null;
@@ -121,11 +116,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
           if (payload.prescribing_vet_name === '') payload.prescribing_vet_name = null;
           if (payload.prescribing_clinic === '') payload.prescribing_clinic = null;
         }
-
-        // Append the current user as the authorizing agent if it's a new record
-        if (!initialData?.id && user) {
-          payload.internal_authorizing_user = user.id;
-        }
+        if (!initialData?.id && user) payload.internal_authorizing_user = user.id;
 
         await saveMutation.mutateAsync(payload);
         onClose();
@@ -193,18 +184,13 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
                 </form.Field>
               </div>
 
-              {/* FIX: Dynamic Vet Fields - Only rendered if it's a formal Prescription */}
               <form.Subscribe selector={(state) => state.values.order_type}>
                 {(orderType) => (
                   orderType === 'PRESCRIPTION' ? (
                     <>
-                      <form.Field 
-                        name="prescribing_vet_name" 
-                        validators={{ onChange: ({ value }) => !value ? 'Vet name is required for Rx' : undefined }}
-                      >
+                      <form.Field name="prescribing_vet_name" validators={{ onChange: ({ value }) => !value ? 'Vet name is required for Rx' : undefined }}>
                         {(field) => <FormInput field={field as any} label="Prescribing Veterinarian" required placeholder="e.g. Dr. Sarah Jenkins" />}
                       </form.Field>
-                      
                       <form.Field name="prescribing_clinic">
                         {(field) => <FormInput field={field as any} label="Clinic / Practice Name" placeholder="e.g. City Exotics Clinic" />}
                       </form.Field>
@@ -231,17 +217,14 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
                      label="Route of Administration" 
                      required
                      options={[
-                       { value: 'PO', label: 'Oral (PO)' },
-                       { value: 'IM', label: 'Intramuscular (IM)' },
-                       { value: 'SC', label: 'Subcutaneous (SC)' },
-                       { value: 'IV', label: 'Intravenous (IV)' },
-                       { value: 'TOPICAL', label: 'Topical / Skin' },
-                       { value: 'OPHTH', label: 'Eye Drops (Ophth)' },
+                       { value: 'PO', label: 'Oral (PO)' }, { value: 'IM', label: 'Intramuscular (IM)' }, { value: 'SC', label: 'Subcutaneous (SC)' },
+                       { value: 'IV', label: 'Intravenous (IV)' }, { value: 'TOPICAL', label: 'Topical / Skin' }, { value: 'OPHTH', label: 'Eye Drops (Ophth)' },
                        { value: 'INHAL', label: 'Inhaled / Nebulizer' }
                      ]} 
                    />
                  )}
                </form.Field>
+               {/* FIX: Removed PRN from Frequency Options entirely */}
                <form.Field name="frequency">
                  {(field) => (
                    <FormSelect 
@@ -249,29 +232,13 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
                      label="Frequency" 
                      required
                      options={[
-                       { value: 'SID', label: 'Once Daily (SID)' },
-                       { value: 'BID', label: 'Twice Daily (BID)' },
-                       { value: 'TID', label: 'Three Times Daily (TID)' },
-                       { value: 'QID', label: 'Four Times Daily (QID)' },
-                       { value: 'EOD', label: 'Every Other Day (EOD)' },
-                       { value: 'PRN', label: 'As Needed (PRN)' },
-                       { value: 'STAT', label: 'Immediate Single Dose (STAT)' },
-                       { value: 'WEEKLY', label: 'Once Weekly' },
-                       { value: 'MONTHLY', label: 'Once Monthly' }
+                       { value: 'SID', label: 'Once Daily (SID)' }, { value: 'BID', label: 'Twice Daily (BID)' }, { value: 'TID', label: 'Three Times Daily (TID)' },
+                       { value: 'QID', label: 'Four Times Daily (QID)' }, { value: 'EOD', label: 'Every Other Day (EOD)' }, { value: 'STAT', label: 'Immediate Single Dose (STAT)' },
+                       { value: 'WEEKLY', label: 'Once Weekly' }, { value: 'MONTHLY', label: 'Once Monthly' }
                      ]} 
                    />
                  )}
                </form.Field>
-               <div className="flex items-center h-full pt-6">
-                 <form.Field name="is_prn">
-                   {(field) => (
-                     <label className="flex items-center gap-3 p-3 bg-amber-50 border border-amber-200 rounded-xl cursor-pointer hover:bg-amber-100 transition-colors w-full">
-                       <input type="checkbox" checked={field.state.value} onChange={(e) => field.handleChange(e.target.checked)} className="w-5 h-5 text-amber-600 rounded border-amber-300 focus:ring-amber-500" />
-                       <span className="text-xs font-bold text-amber-900 tracking-wide">PRN (Administer As Needed)</span>
-                     </label>
-                   )}
-                 </form.Field>
-               </div>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-slate-100">
