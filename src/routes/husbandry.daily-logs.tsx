@@ -167,15 +167,15 @@ export function DailyLogsPage() {
   const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
-        <div>
-          <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Entry Sheet</h1>
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Day-To-Day Husbandry Logs Entry Matrix</p>
+    <div className="max-w-7xl mx-auto w-full min-w-0 space-y-6 px-2 md:px-0">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-white p-4 md:p-6 rounded-2xl border border-slate-200 shadow-sm w-full min-w-0">
+        <div className="min-w-0 flex-shrink-0">
+          <h1 className="text-2xl font-black text-slate-900 tracking-tight truncate">Husbandry Entry Sheet</h1>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1 truncate">Day-To-Day Husbandry Logs Entry Matrix</p>
         </div>
         
-        <div className="flex flex-col sm:flex-row items-center gap-4 self-center md:self-auto w-full sm:w-auto">
-          <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner overflow-x-auto w-full sm:w-auto custom-scrollbar">
+        <div className="flex flex-col sm:flex-row items-center gap-4 self-stretch md:self-auto min-w-0 w-full md:w-auto">
+          <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner overflow-x-auto custom-scrollbar w-full sm:w-auto">
             {SECTION_BAR.map(btn => (
               <button
                 key={btn.id} type="button" onClick={() => setActiveSection(btn.id)}
@@ -188,7 +188,7 @@ export function DailyLogsPage() {
             ))}
           </div>
 
-          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner w-full sm:w-auto justify-between sm:justify-start">
+          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner w-full sm:w-auto justify-between sm:justify-start flex-shrink-0">
             <button onClick={() => shiftDate(-1)} className="p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg transition-all shadow-sm"><ChevronLeft size={14} /></button>
             <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="bg-transparent border-none text-xs font-black uppercase tracking-widest text-slate-700 outline-none text-center px-2 w-32" />
             <button onClick={() => shiftDate(1)} className="p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg transition-all shadow-sm"><ChevronRight size={14} /></button>
@@ -196,7 +196,7 @@ export function DailyLogsPage() {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col">
+      <div className="bg-white border border-slate-200 rounded-2xl shadow-sm overflow-hidden flex flex-col w-full min-w-0">
         {logsError ? (
           <div className="p-10 text-center text-rose-600 bg-rose-50 font-bold flex flex-col items-center gap-3">
             <AlertCircle size={24} /> Database link exception. Verify network availability.
@@ -207,14 +207,14 @@ export function DailyLogsPage() {
             <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Syncing active workbook metrics...</span>
           </div>
         ) : (
-          <div className="w-full overflow-x-auto custom-scrollbar">
-            <table className="w-full text-left text-sm border-collapse">
+          <div className="w-full min-w-0 overflow-x-auto custom-scrollbar">
+            <table className="w-full min-w-[1024px] text-left text-sm border-collapse">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 font-black text-[10px] uppercase tracking-widest">
                 <tr>
-                  <th className="px-6 py-4 min-w-[180px]">Entity Matrix</th>
+                  <th className="px-6 py-4 w-48">Entity Matrix</th>
                   <th className="px-6 py-4 w-44">Target Bio-Weight</th>
                   <th className="px-6 py-4 w-44">Thermal Parameters</th>
-                  <th className="px-6 py-4 min-w-[280px]">Multi-Feeding Event Pipeline</th>
+                  <th className="px-6 py-4 min-w-[280px] w-80">Multi-Feeding Event Pipeline</th>
                   <th className="px-6 py-4">Daily Descriptive Observations</th>
                 </tr>
               </thead>
