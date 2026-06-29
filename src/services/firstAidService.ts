@@ -20,51 +20,49 @@ export const firstAidService = {
   },
 
   async getStaffMembers(): Promise<StaffMember[]> {
+    // AUDIT FIX 12: Removed .eq('is_deleted', false) to prevent orphaned records in history
     const { data, error } = await supabase
       .from('users')
       .select('id, name, initials, email')
-      .eq('is_deleted', false)
       .order('name');
 
     if (error) throw error;
     return data;
   },
 
-  // Handles both isolated clinical logs and compound operational incidents securely
   async commitFirstAidLog(firstAidPayload: any, incidentPayload?: any) {
-    const promises = [];
-    
-    // Offline-Safe Relational Linkage
-    const firstAidId = crypto.randomUUID();
     let incidentId = null;
 
+    // AUDIT FIX 1, 2, 4: Execute sequentially. Let Postgres generate the UUID to avoid client-side crypto crashes.
     if (incidentPayload) {
-      incidentId = crypto.randomUUID();
-      promises.push(
-        supabase.from('incidents').insert([{
+      const { data: incident, error: incidentErr } = await supabase
+        .from('incidents')
+        .insert([{
           ...incidentPayload,
-          id: incidentId,
           is_deleted: false,
-          status: 'OPEN' // Default status for new operational incidents
+          status: 'OPEN'
         }])
-      );
+        .select('id')
+        .single();
+
+      if (incidentErr) throw incidentErr;
+      incidentId = incident.id;
     }
 
-    promises.push(
-      supabase.from('first_aid_logs').insert([{
+    const { error: faError } = await supabase
+      .from('first_aid_logs')
+      .insert([{
         ...firstAidPayload,
-        id: firstAidId,
-        incident_id: incidentId, // Links seamlessly, even if offline
+        incident_id: incidentId, 
         is_deleted: false
-      }])
-    );
+      }]);
 
-    // Fire both requests in parallel. TanStack will queue both if offline.
-    const results = await Promise.all(promises);
-    
-    // Check for errors in the parallel execution
-    for (const res of results) {
-      if (res.error) throw res.error;
+    if (faError) {
+      // AUDIT FIX 2: Soft fallback to rollback the incident if the first aid log constraint fails
+      if (incidentId) {
+        await supabase.from('incidents').delete().eq('id', incidentId);
+      }
+      throw faError;
     }
 
     return true;
