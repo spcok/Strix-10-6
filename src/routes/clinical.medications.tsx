@@ -1,15 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
-import { Pill, Activity, WifiOff, FileText } from 'lucide-react';
+import { Pill, Activity, WifiOff, FileText, AlertCircle, Loader2 } from 'lucide-react';
 
 import DigitalMAR from '../components/medical/DigitalMAR';
 import PrescriptionList from '../components/medical/PrescriptionList';
 import PrescriptionFormModal from '../components/medical/PrescriptionFormModal';
 import MedicationHistory from '../components/medical/MedicationHistory';
 import { marExportService } from '../services/marExportService';
+import { Prescription } from '../types';
 
 export const Route = createFileRoute('/clinical/medications')({
   component: MedicationsModule,
@@ -20,59 +21,92 @@ function MedicationsModule() {
   const { user } = useAuth();
   
   const [activeTab, setActiveTab] = useState<'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY'>('DIGITAL_MAR');
-  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [exportError, setExportError] = useState<string | null>(null);
   
   const [isPrescriptionModalOpen, setIsPrescriptionModalOpen] = useState(false);
-  const [editingPrescription, setEditingPrescription] = useState<any>(null);
+  const [editingPrescription, setEditingPrescription] = useState<Prescription | null>(null);
+
+  // --- STRICT NETWORK HEARTBEAT ---
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
-    const handleOnline = () => setIsOnline(true);
+    let isMounted = true;
+    const checkConnection = async () => {
+      try {
+        const { error } = await supabase.from('animals').select('id').limit(1);
+        if (isMounted) setIsOnline(!error);
+      } catch {
+        if (isMounted) setIsOnline(false);
+      }
+    };
+
+    checkConnection();
+    const interval = setInterval(checkConnection, 15000); 
+
+    const handleOnline = () => checkConnection();
     const handleOffline = () => setIsOnline(false);
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+
     return () => {
+      isMounted = false;
+      clearInterval(interval);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
     };
   }, []);
 
+  const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+
   useEffect(() => {
-    const channel = supabase
+    // Only execute data fetch if we are online
+    if (isOnline) {
+      const fetchRx = async () => {
+        const { data, error } = await supabase
+          .from('prescriptions')
+          .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements, date_of_birth, status)')
+          .eq('status', 'ACTIVE')
+          .order('start_date', { ascending: false });
+        if (!error && data) setPrescriptions(data as Prescription[]);
+      };
+      fetchRx();
+    }
+  }, [isOnline]);
+
+  useEffect(() => {
+    const adminChannel = supabase
       .channel('medication_administrations_changes')
-      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'medication_administrations' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['medication_administrations'] });
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'medication_administrations' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['medication_administrations'], refetchType: 'active' });
       })
       .subscribe();
-    return () => { supabase.removeChannel(channel); };
-  }, [queryClient]);
 
-  // FIX: Added date_of_birth and status to the fetch query for the DOCX Age/Quarantine checks
-  const { data: prescriptions = [], isLoading: loadingRx } = useQuery({
-    queryKey: ['prescriptions', 'active'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('prescriptions')
-        .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements, date_of_birth, status)')
-        .eq('status', 'ACTIVE')
-        .order('start_date', { ascending: false });
-      if (error) throw error;
-      return data;
-    },
-    networkMode: 'offlineFirst',
-  });
+    const rxChannel = supabase
+      .channel('prescriptions_changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'prescriptions' }, () => {
+        queryClient.invalidateQueries({ queryKey: ['prescriptions'], refetchType: 'active' });
+      })
+      .subscribe();
+
+    return () => { 
+      supabase.removeChannel(adminChannel); 
+      supabase.removeChannel(rxChannel); 
+    };
+  }, [queryClient]);
 
   const handleOpenNewOrder = () => {
     setEditingPrescription(null);
     setIsPrescriptionModalOpen(true);
   };
 
-  const handleEditOrder = (rx: any) => {
+  const handleEditOrder = (rx: Prescription) => {
     setEditingPrescription(rx);
     setIsPrescriptionModalOpen(true);
   };
 
-  const handlePrintUnifiedMar = async (rx: any, setLoading: (b: boolean) => void) => {
+  const handlePrintUnifiedMar = async (rx: Prescription, setLoading: (b: boolean) => void) => {
     setLoading(true);
+    setExportError(null);
     try {
       const patientPrescriptions = prescriptions.filter(p => p.animal_id === rx.animal_id);
       await marExportService.exportUnifiedMAR(
@@ -81,25 +115,39 @@ function MedicationsModule() {
         user?.name || 'Staff', 
         user?.id || 'Unknown-ID'
       );
-    } catch (error) {
+    } catch (error: any) {
       console.error(error);
-      alert("Failed to generate DOCX MAR chart. Ensure you are online to fetch the logo.");
+      setExportError(error.message || "Failed to generate DOCX MAR chart. Please ensure network is stable.");
     } finally {
       setLoading(false);
     }
   };
 
+  // --- STRICT LOCKOUT RENDER ---
+  if (!isOnline) {
+    return (
+      <div className="max-w-7xl mx-auto space-y-6 pb-32">
+        <div className="bg-slate-900 text-white p-12 rounded-2xl shadow-2xl flex flex-col items-center justify-center text-center min-h-[60vh] border border-slate-800">
+          <WifiOff size={64} className="mb-6 text-blue-500" />
+          <h2 className="text-3xl font-black uppercase tracking-widest mb-3">Clinical Dispensary Locked</h2>
+          <p className="font-bold text-slate-400 max-w-lg text-sm leading-relaxed">
+            To enforce veterinary data integrity and prevent split-brain double dosing, this module requires an active database connection. All caches are suspended.
+          </p>
+          <div className="mt-8 px-6 py-3 bg-slate-800 rounded-xl text-xs font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 border border-slate-700">
+            <Loader2 size={16} className="animate-spin text-blue-500" /> Securing connection...
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-24">
-      {!isOnline && (
-        <div className="bg-rose-600 text-white p-4 rounded-xl shadow-lg flex items-center justify-between animate-in fade-in slide-in-from-top-4">
-          <div className="flex items-center gap-3">
-            <WifiOff size={20} />
-            <div>
-              <p className="font-black uppercase tracking-widest text-xs">Clinical Network Disconnected</p>
-              <p className="text-sm font-medium text-rose-100">Medication administration is locked to prevent double-dosing. Please reconnect to WiFi.</p>
-            </div>
-          </div>
+
+      {exportError && (
+        <div className="bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-xl shadow-sm flex items-center gap-3 animate-in fade-in">
+          <AlertCircle size={20} className="shrink-0 text-rose-600" />
+          <p className="text-sm font-bold">{exportError}</p>
         </div>
       )}
 

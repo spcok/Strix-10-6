@@ -1,40 +1,21 @@
 import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useInfiniteQuery, useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
+import { reportExportService } from '../services/reportExportService';
 import { format, parseISO, formatISO } from 'date-fns';
-import { ShieldAlert, Plus, X, Search, Save, Loader2, AlertCircle, CheckCircle2, Info } from 'lucide-react';
+import { 
+  ShieldAlert, Plus, X, Search, Save, Loader2, AlertCircle, 
+  CheckCircle2, WifiOff, CalendarDays, FilterX, Download 
+} from 'lucide-react';
 import { Animal, IsolationLog, User } from '../types';
 
 // ------------------------------------------------------------------
-// STRICT OFFLINE QUERY OPTIONS & 14-DAY RAM CAP
+// STRICTLY ONLINE QUERY OPTIONS
 // ------------------------------------------------------------------
-const isolationLogsOptions = queryOptions({
-  queryKey: ['isolation_logs'],
-  queryFn: async () => {
-    // AUDIT FIX 5: Deterministic 14-day boundary
-    const boundary = new Date();
-    boundary.setDate(boundary.getDate() - 14);
-    boundary.setHours(0, 0, 0, 0);
-
-    const { data, error } = await supabase
-      .from('isolation_logs')
-      .select('*, animals(name, species)')
-      .eq('is_deleted', false)
-      .or(`end_date.is.null,start_date.gte.${boundary.toISOString()}`)
-      .order('start_date', { ascending: false });
-    if (error) throw error;
-    return data as IsolationLog[];
-  },
-  staleTime: 1000 * 60 * 15,
-  gcTime: 1000 * 60 * 60 * 24 * 15,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
-});
-
 const activeAnimalsOptions = queryOptions({
   queryKey: ['active_animals'],
   queryFn: async () => {
@@ -42,13 +23,10 @@ const activeAnimalsOptions = queryOptions({
     if (error) throw error;
     return data as Animal[];
   },
-  staleTime: 1000 * 60 * 60,
-  gcTime: 1000 * 60 * 60 * 24 * 15,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
+  staleTime: 0,
+  gcTime: 1000 * 60 * 5
 });
 
-// Added to securely fetch staff UUIDs for "Authorized By" 
 const staffUsersOptions = queryOptions({
   queryKey: ['staff_users'],
   queryFn: async () => {
@@ -56,29 +34,19 @@ const staffUsersOptions = queryOptions({
     if (error) throw error;
     return data as User[];
   },
-  staleTime: 1000 * 60 * 60,
-  gcTime: 1000 * 60 * 60 * 24 * 15,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
+  staleTime: 0,
+  gcTime: 1000 * 60 * 5
 });
 
 export const Route = createFileRoute('/clinical/isolation')({
   loader: async ({ context: { queryClient } }) => {
     if (queryClient) {
       await Promise.all([ 
-        queryClient.ensureQueryData(isolationLogsOptions), 
         queryClient.ensureQueryData(activeAnimalsOptions),
         queryClient.ensureQueryData(staffUsersOptions)
       ]);
     }
   },
-  errorComponent: () => (
-    <div className="max-w-7xl mx-auto p-6 mt-6 bg-rose-50 border border-rose-200 rounded-2xl flex flex-col items-center justify-center text-rose-700 text-center shadow-sm">
-      <AlertCircle size={32} className="mb-3 opacity-80" />
-      <h3 className="text-sm font-black uppercase tracking-widest">Connection Error</h3>
-      <p className="text-xs font-bold mt-2">Failed to sync isolation logs. Please verify your network connection.</p>
-    </div>
-  ),
   component: ClinicalIsolationPage,
 });
 
@@ -87,38 +55,127 @@ export const Route = createFileRoute('/clinical/isolation')({
 // ------------------------------------------------------------------
 export function ClinicalIsolationPage() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const { user, profile } = useAuth();
   
-  // AUDIT FIX 1: Explicit scroll parent ref for localized virtualization
+  // --- STRICT NETWORK HEARTBEAT ---
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+
+  useEffect(() => {
+    let isMounted = true;
+    const checkConnection = async () => {
+      try {
+        const { error } = await supabase.from('animals').select('id').limit(1);
+        if (isMounted) setIsOnline(!error);
+      } catch {
+        if (isMounted) setIsOnline(false);
+      }
+    };
+
+    checkConnection();
+    const interval = setInterval(checkConnection, 15000); 
+
+    const handleOnline = () => checkConnection();
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, []);
+
   const scrollParentRef = useRef<HTMLDivElement>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // --- FACETED FILTER STATE ---
+  const [selectedAnimalId, setSelectedAnimalId] = useState<string>('ALL');
+  const [startDate, setStartDate] = useState<string>('');
+  const [endDate, setEndDate] = useState<string>('');
+  const [selectedTypes, setSelectedTypes] = useState<string[]>([]);
+  const isolationTypes = ['MEDICAL_QUARANTINE', 'NEW_ARRIVAL', 'BEHAVIORAL_ISOLATION', 'INFECTIOUS_DISEASE'];
+
+  const toggleType = (type: string) => {
+    setSelectedTypes(prev => prev.includes(type) ? prev.filter(t => t !== type) : [...prev, type]);
+  };
+
+  const clearFilters = () => {
+    setSelectedAnimalId('ALL');
+    setStartDate('');
+    setEndDate('');
+    setSelectedTypes([]);
+  };
+
+  const { data: animals = [] } = useQuery({ ...activeAnimalsOptions, enabled: isOnline });
+  const { data: staff = [] } = useQuery({ ...staffUsersOptions, enabled: isOnline });
+
+  // --- INFINITE QUERY PIPELINE (UNBOUNDED SCALING) ---
+  const { 
+    data, 
+    fetchNextPage, 
+    hasNextPage, 
+    isFetchingNextPage, 
+    isLoading 
+  } = useInfiniteQuery({
+    queryKey: ['isolation_logs_infinite', selectedAnimalId, startDate, endDate, selectedTypes],
+    queryFn: async ({ pageParam = 0 }) => {
+      const limit = 30;
+      let query = supabase.from('isolation_logs').select('*, animals(name, species)').eq('is_deleted', false);
+      
+      if (selectedAnimalId !== 'ALL') query = query.eq('animal_id', selectedAnimalId);
+      if (startDate) query = query.gte('start_date', new Date(startDate).toISOString());
+      if (endDate) query = query.lte('start_date', new Date(endDate + 'T23:59:59').toISOString());
+      if (selectedTypes.length > 0) query = query.in('isolation_type', selectedTypes);
+      
+      query = query.order('start_date', { ascending: false });
+      query = query.range(pageParam * limit, (pageParam + 1) * limit - 1);
+      
+      const { data, error } = await query;
+      if (error) throw error;
+      return data || [];
+    },
+    getNextPageParam: (lastPage, allPages) => lastPage.length === 30 ? allPages.length : undefined,
+    initialPageParam: 0,
+    enabled: isOnline
+  });
+
+  const logs = useMemo(() => data ? data.pages.flat() : [], [data]);
+
+  // --- VIRTUALIZER DYNAMIC ESTIMATION ---
+  const rowVirtualizer = useVirtualizer({
+    count: hasNextPage ? logs.length + 1 : logs.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 110, 
+    overscan: 5,
+  });
+
+  // --- INFINITE SCROLL LISTENER ---
+  useEffect(() => {
+    const [lastItem] = rowVirtualizer.getVirtualItems().slice(-1);
+    if (!lastItem) return;
+    if (lastItem.index >= logs.length - 1 && hasNextPage && !isFetchingNextPage) {
+      fetchNextPage();
+    }
+  }, [hasNextPage, fetchNextPage, logs.length, isFetchingNextPage, rowVirtualizer.getVirtualItems()]);
+
+  useEffect(() => {
+    const handleResize = () => { rowVirtualizer.measure(); };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [rowVirtualizer]);
 
   useEffect(() => {
     const channel = supabase.channel('isolation-logs-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'isolation_logs' }, () => {
-        // AUDIT FIX 2: Restricted invalidation to active queries to prevent background thrashing
-        queryClient.invalidateQueries({ queryKey: ['isolation_logs'], refetchType: 'active' });
+        queryClient.invalidateQueries({ queryKey: ['isolation_logs_infinite'], refetchType: 'active' });
       }).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
-  const { data: logs = [], isLoading } = useQuery(isolationLogsOptions);
-  const { data: animals = [] } = useQuery(activeAnimalsOptions);
-  const { data: staff = [] } = useQuery(staffUsersOptions);
-
-  const filteredLogs = useMemo(() => {
-    if (!searchQuery) return logs;
-    const lower = searchQuery.toLowerCase();
-    return logs.filter((log) => 
-      ((log as any).animals?.name || '').toLowerCase().includes(lower) ||
-      (log.reason || '').toLowerCase().includes(lower) ||
-      (log.isolation_type || '').toLowerCase().includes(lower)
-    );
-  }, [logs, searchQuery]);
-
-  // AUDIT FIX 4: Safety wrapper preventing null unwrap
   const completeIsolationMutation = useMutation({
     mutationFn: async (id: string) => {
       if (!user?.id) throw new Error("Authentication required to complete isolation.");
@@ -128,24 +185,56 @@ export function ClinicalIsolationPage() {
       }).eq('id', id);
       if (error) throw error;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['isolation_logs'] }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['isolation_logs_infinite'] }),
     onError: (err: any) => setErrorMsg(err.message || 'Failed to complete isolation period.')
   });
 
-  // AUDIT FIX 1: Correctly use useVirtualizer attached to the localized scroll element
-  const rowVirtualizer = useVirtualizer({
-    count: filteredLogs.length,
-    getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 110, 
-    overscan: 5,
-  });
+  const handleExport = async () => {
+    setIsExporting(true);
+    try {
+      const exportData = logs.map((log: any) => {
+        const staffName = staff.find(s => s.id === log.authorized_by)?.name || 'Unknown';
+        return [
+          log.start_date ? format(parseISO(log.start_date), 'dd MMM yyyy') : 'N/A',
+          log.end_date ? format(parseISO(log.end_date), 'dd MMM yyyy') : 'Ongoing',
+          log.animals?.name || 'Unknown Patient',
+          (log.isolation_type || 'UNKNOWN').replace(/_/g, ' '),
+          log.reason || 'N/A',
+          staffName
+        ];
+      });
 
-  // AUDIT FIX 1: Window resize observer to force row recalibration on tablet rotation
-  useEffect(() => {
-    const handleResize = () => { rowVirtualizer.measure(); };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [rowVirtualizer]);
+      await reportExportService.exportSingleReport({
+        title: selectedAnimalId === 'ALL' ? "Global Biosecurity Logs" : `Quarantine History: ${logs[0]?.animals?.name}`,
+        columns: ["Start Date", "End Date", "Patient", "Protocol", "Reason", "Authorized By"],
+        data: exportData,
+        generatorName: profile?.name || 'Veterinary Staff',
+        dateRange: startDate && endDate ? `${startDate} to ${endDate}` : "Unbounded History"
+      }, 'QUARANTINE_LOGS');
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  // --- STRICT LOCKOUT RENDER ---
+  if (!isOnline) {
+    return (
+      <div className="max-w-7xl mx-auto space-y-6 pb-32">
+        <div className="bg-slate-900 text-white p-12 rounded-2xl shadow-2xl flex flex-col items-center justify-center text-center min-h-[60vh] border border-slate-800">
+          <WifiOff size={64} className="mb-6 text-rose-500" />
+          <h2 className="text-3xl font-black uppercase tracking-widest mb-3">Clinical Systems Locked</h2>
+          <p className="font-bold text-slate-400 max-w-lg text-sm leading-relaxed">
+            To enforce veterinary data integrity and prevent split-brain clinical errors, this module requires an active database connection. Offline caching is disabled.
+          </p>
+          <div className="mt-8 px-6 py-3 bg-slate-800 rounded-xl text-xs font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 border border-slate-700">
+            <Loader2 size={16} className="animate-spin text-rose-500" /> Securing connection...
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   const virtualItems = rowVirtualizer.getVirtualItems();
 
@@ -159,20 +248,17 @@ export function ClinicalIsolationPage() {
           <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Biosecurity & Medical Segregation</p>
         </div>
 
-        <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
-          <div className="relative w-full sm:w-64">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
-            <input 
-              type="text" 
-              placeholder="Search logs..." 
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500/50 focus:ring-2 focus:ring-rose-500/20 transition-all shadow-sm" 
-            />
-          </div>
+        <div className="flex gap-2 w-full md:w-auto">
+          <button 
+            onClick={handleExport}
+            disabled={isExporting || logs.length === 0}
+            className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-2 bg-slate-100 text-slate-700 font-black text-[10px] uppercase tracking-widest rounded-xl hover:bg-slate-200 transition-colors border border-slate-200 shadow-sm disabled:opacity-50"
+          >
+            {isExporting ? <Loader2 size={14} className="animate-spin" /> : <Download size={14} />} Export
+          </button>
           <button 
             onClick={() => setIsModalOpen(true)}
-            className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-2 bg-rose-600 hover:bg-rose-500 text-white font-black text-xs uppercase tracking-widest rounded-xl transition-all shadow-[0_0_15px_rgba(225,29,72,0.15)]"
+            className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 py-2 bg-rose-600 hover:bg-rose-500 text-white font-black text-[10px] uppercase tracking-widest rounded-xl transition-all shadow-[0_0_15px_rgba(225,29,72,0.15)]"
           >
             <Plus size={16} /> Log Isolation
           </button>
@@ -180,19 +266,66 @@ export function ClinicalIsolationPage() {
       </div>
 
       {errorMsg && (
-        <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 p-3 rounded-xl text-rose-800 shadow-sm mx-1">
+        <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 p-3 rounded-xl text-rose-800 shadow-sm mx-1 animate-in fade-in">
           <AlertCircle size={16} className="text-rose-600 shrink-0" />
           <span className="text-xs font-bold">{errorMsg}</span>
         </div>
       )}
 
-      {/* AUDIT FIX 5: Added explicit UI warning for the 14-day memory cap limit */}
-      <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 p-3 rounded-xl text-slate-600 shadow-sm mx-1">
-        <Info size={16} className="text-slate-400 shrink-0" />
-        <span className="text-xs font-bold">Displaying currently active quarantines and completed logs from the past 14 days.</span>
+      {/* --- ADVANCED FACETED FILTER ENGINE --- */}
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-4">
+        <div className="flex flex-col md:flex-row gap-4">
+          <div className="flex-1">
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5 ml-1">Patient Context</label>
+            <div className="relative">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+              <select 
+                value={selectedAnimalId} 
+                onChange={(e) => setSelectedAnimalId(e.target.value)}
+                className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 shadow-sm appearance-none cursor-pointer"
+              >
+                <option value="ALL">Global Facility View (All Animals)</option>
+                {animals.map((a: any) => <option key={a.id} value={a.id}>{a.name} ({a.species})</option>)}
+              </select>
+            </div>
+          </div>
+          <div className="md:w-1/3">
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5 ml-1">Start Date</label>
+            <div className="relative">
+              <CalendarDays className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+              <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 shadow-sm" />
+            </div>
+          </div>
+          <div className="md:w-1/3">
+            <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5 ml-1">End Date</label>
+            <div className="relative">
+              <CalendarDays className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+              <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-9 pr-4 py-2.5 text-xs font-bold text-slate-900 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500 shadow-sm" />
+            </div>
+          </div>
+        </div>
+        
+        <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 pt-3 border-t border-slate-100">
+          <div className="flex flex-wrap gap-2">
+            {isolationTypes.map(type => (
+              <button
+                key={type}
+                onClick={() => toggleType(type)}
+                className={`px-3 py-1.5 rounded-lg text-[9px] font-black uppercase tracking-widest transition-all border shadow-sm ${selectedTypes.includes(type) ? 'bg-rose-600 text-white border-rose-700' : 'bg-white text-slate-500 border-slate-200 hover:bg-slate-50'}`}
+              >
+                {type.replace(/_/g, ' ')}
+              </button>
+            ))}
+          </div>
+          {(selectedAnimalId !== 'ALL' || startDate || endDate || selectedTypes.length > 0) && (
+            <button onClick={clearFilters} className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-widest text-slate-600 hover:text-slate-800 px-3 py-1.5 bg-slate-100 rounded-lg transition-colors">
+              <FilterX size={12} /> Clear Filters
+            </button>
+          )}
+        </div>
       </div>
 
-      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-18rem)] min-h-[500px]">
+      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden flex flex-col h-[calc(100vh-22rem)] min-h-[500px]">
         {isLoading && <div className="absolute inset-0 z-20 flex items-center justify-center bg-white/60 backdrop-blur-sm"><Loader2 className="animate-spin text-rose-600 w-8 h-8" /></div>}
         
         <div className="grid grid-cols-12 gap-4 px-6 py-4 bg-slate-50 border-b border-slate-200 text-[10px] font-black text-slate-500 uppercase tracking-widest sticky top-0 z-10 min-w-[900px]">
@@ -203,17 +336,30 @@ export function ClinicalIsolationPage() {
         </div>
 
         <div ref={scrollParentRef} className="overflow-auto flex-1 custom-scrollbar min-w-[900px] relative">
-          {filteredLogs.length === 0 && !isLoading ? (
-            <div className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No isolation logs found matching query.</div>
+          {logs.length === 0 && !isLoading ? (
+            <div className="flex flex-col items-center justify-center py-20 text-slate-400">
+              <ShieldAlert size={48} className="mb-4 opacity-20" />
+              <p className="text-xs font-black uppercase tracking-widest mb-1">No Quarantine Logs Found</p>
+              <p className="text-xs font-medium">Try adjusting your filters or date range.</p>
+            </div>
           ) : (
             <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
               {virtualItems.map((virtualRow) => {
-                const log = filteredLogs[virtualRow.index];
+                const isLoaderRow = virtualRow.index > logs.length - 1;
+                const log = logs[virtualRow.index];
+
+                if (isLoaderRow) {
+                  return (
+                    <div key="loader" className="absolute top-0 left-0 w-full flex justify-center py-6" style={{ transform: `translateY(${virtualRow.start}px)` }}>
+                      <Loader2 className="animate-spin text-rose-500" size={24} />
+                    </div>
+                  );
+                }
+
                 const isActive = !log.end_date;
                 const isCompleting = completeIsolationMutation.isPending && completeIsolationMutation.variables === log.id;
 
                 return (
-                  // AUDIT FIX 1: Applied ref and data-index for dynamic element measuring
                   <div key={log.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className={`absolute top-0 left-0 w-full transition-colors border-b border-slate-100 ${isActive ? 'bg-rose-50/20' : 'hover:bg-slate-50/60'}`} style={{ transform: `translateY(${virtualRow.start}px)` }}>
                     <div className="grid grid-cols-12 gap-4 px-6 py-4 items-center h-full">
                       <div className="col-span-2 flex flex-col items-start gap-1.5">
@@ -232,7 +378,6 @@ export function ClinicalIsolationPage() {
                             {(log as any).animals?.species || 'Unknown'}
                           </span>
                           <span className="px-2 py-0.5 rounded text-[8px] font-black uppercase tracking-widest border bg-amber-50 text-amber-700 border-amber-200 truncate">
-                            {/* AUDIT FIX 5: Defensive formatting against null strings */}
                             {(log.isolation_type || 'UNKNOWN').replace(/_/g, ' ')}
                           </span>
                         </div>
@@ -269,7 +414,7 @@ export function ClinicalIsolationPage() {
 }
 
 // ---------------------------------------------------------------------------
-// TANSTACK FORM MODAL (V3 SCHEMA COMPLIANT & ASYNC SECURE)
+// TANSTACK FORM MODAL (V3 SCHEMA COMPLIANT)
 // ---------------------------------------------------------------------------
 function IsolationModal({ onClose, animals, staff }: { onClose: () => void, animals: Animal[], staff: User[] }) {
   const queryClient = useQueryClient();
@@ -282,7 +427,7 @@ function IsolationModal({ onClose, animals, staff }: { onClose: () => void, anim
       if (error) throw error;
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['isolation_logs'] });
+      queryClient.invalidateQueries({ queryKey: ['isolation_logs_infinite'] });
     }
   });
 
@@ -293,9 +438,8 @@ function IsolationModal({ onClose, animals, staff }: { onClose: () => void, anim
       start_date: format(new Date(), "yyyy-MM-dd'T'HH:mm"),
       reason: '',
       notes: '',
-      authorized_by: '' // Requires UUID matching a User ID
+      authorized_by: '' 
     },
-    // AUDIT FIX 3: Asynchronous submission explicitly blocking immediate unmount and data loss
     onSubmit: async ({ value }) => {
       setErrorMsg(null);
       
@@ -311,7 +455,6 @@ function IsolationModal({ onClose, animals, staff }: { onClose: () => void, anim
           start_date: parsedStartDate,
           reason: value.reason,
           notes: value.notes || null,
-          // AUDIT FIX 4: Explicitly required UUID
           authorized_by: value.authorized_by,
           created_by: user.id,
           modified_by: user.id,
