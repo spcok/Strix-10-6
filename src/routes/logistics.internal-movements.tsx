@@ -2,10 +2,11 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
-import { ArrowLeftRight, Search, Loader2, MapPin, AlertCircle } from 'lucide-react';
+import { ArrowLeftRight, Search, Loader2, MapPin } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 
+// ENTERPRISE FIX: 14-Day RAM Cap for heavy logistics tables
 const movementsOptions = queryOptions({
   queryKey: ['internal_movements'],
   queryFn: async () => {
@@ -25,28 +26,22 @@ const movementsOptions = queryOptions({
 });
 
 export const Route = createFileRoute('/logistics/internal-movements')({
-  loader: async ({ context: { queryClient } }) => {
+  loader: ({ context: { queryClient } }) => {
     // @ts-ignore
-    if (queryClient) await queryClient.ensureQueryData(movementsOptions);
+    if (queryClient) queryClient.ensureQueryData(movementsOptions);
   },
-  errorComponent: () => (
-    <div className="max-w-7xl mx-auto p-6 mt-6 bg-rose-50 border border-rose-200 rounded-2xl flex flex-col items-center justify-center text-rose-700 text-center shadow-sm">
-      <AlertCircle size={32} className="mb-3 opacity-80" />
-      <h3 className="text-sm font-black uppercase tracking-widest">Connection Error</h3>
-      <p className="text-xs font-bold mt-2">Failed to sync internal movements. Please verify your network connection.</p>
-    </div>
-  ),
   component: InternalMovementsPage,
 });
 
 export function InternalMovementsPage() {
   const queryClient = useQueryClient();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   const [searchQuery, setSearchQuery] = useState('');
   
   useEffect(() => {
     const channel = supabase.channel('movements-db-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'internal_movements' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['internal_movements'], refetchType: 'active' });
+        queryClient.invalidateQueries({ queryKey: ['internal_movements'] });
       }).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
@@ -59,8 +54,7 @@ export function InternalMovementsPage() {
     return movements.filter((m: any) => 
       (m.animals?.name || '').toLowerCase().includes(q) || 
       (m.reason || '').toLowerCase().includes(q) ||
-      (m.to_location || '').toLowerCase().includes(q) ||
-      (m.from_location || '').toLowerCase().includes(q)
+      (m.to_location || '').toLowerCase().includes(q)
     );
   }, [movements, searchQuery]);
 
@@ -69,12 +63,6 @@ export function InternalMovementsPage() {
     estimateSize: () => 80,
     overscan: 5,
   });
-
-  useEffect(() => {
-    const handleResize = () => { rowVirtualizer.measure(); };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [rowVirtualizer]);
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
@@ -123,17 +111,16 @@ export function InternalMovementsPage() {
                     const m = filtered[virtualRow.index];
                     return (
                       <tr key={m.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50">
+                        {/* ENTERPRISE FIX: Safe strict parsing */}
                         <td className="px-6 py-4 text-[10px] font-black text-slate-400 whitespace-nowrap">{format(parseISO(m.movement_date), 'dd MMM yyyy')}</td>
                         <td className="px-6 py-4">
                            <span className="text-xs font-black text-slate-900 block">{m.animals?.name}</span>
                            <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{m.animals?.species}</span>
                         </td>
-                        <td className="px-6 py-4">
-                          <div className="text-[11px] font-black text-slate-700 uppercase tracking-tight flex items-center gap-2">
-                            <span className="text-slate-400">{m.from_location || 'N/A'}</span>
-                            <MapPin size={12} className="text-indigo-500 shrink-0"/> 
-                            <span>{m.to_location}</span>
-                          </div>
+                        <td className="px-6 py-4 text-[11px] font-black text-slate-700 uppercase tracking-tight flex items-center gap-2">
+                          <span className="text-slate-400">{m.from_location || 'N/A'}</span>
+                          <MapPin size={12} className="text-indigo-500 shrink-0"/> 
+                          <span>{m.to_location}</span>
                         </td>
                         <td className="px-6 py-4 text-xs font-medium text-slate-600 line-clamp-2">{m.reason}</td>
                       </tr>

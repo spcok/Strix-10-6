@@ -3,13 +3,16 @@ import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter, AlertCircle } from 'lucide-react';
-import { format, addDays } from 'date-fns';
+import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter } from 'lucide-react';
+import { format, addDays, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
 import { feedingService } from '../services/feedingService';
 
+// ------------------------------------------------------------------
+// 1. STRICT OFFLINE QUERY OPTIONS
+// ------------------------------------------------------------------
 const getAnimalsOptions = () => queryOptions({
   queryKey: ['animals', 'dashboard'],
   queryFn: async () => {
@@ -54,9 +57,14 @@ const getFoodOptions = () => queryOptions({
   meta: { persist: true }
 });
 
+// ------------------------------------------------------------------
+// 2. ROUTE CONFIGURATION (Pre-fetching)
+// ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/feeding')({
   loader: async ({ context: { queryClient } }) => {
+    // @ts-ignore
     if (queryClient) {
+      // @ts-ignore
       await Promise.all([
         queryClient.ensureQueryData(getAnimalsOptions()),
         queryClient.ensureQueryData(getSchedulesOptions()),
@@ -69,18 +77,23 @@ export const Route = createFileRoute('/husbandry/feeding')({
 
 const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
 
+// ------------------------------------------------------------------
+// 3. MAIN COMPONENT
+// ------------------------------------------------------------------
 export function FeedingSchedulePage() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const scrollParentRef = useRef<HTMLDivElement>(null);
   
   const [activeTab, setActiveTab] = useState<string>('EXOTIC');
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const categories = ['OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'];
 
   const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
   const [viewLayout, setViewLayout] = useState<'individual' | 'grouped'>('individual');
 
+  // ------------------------------------------------------------------
+  // SUPABASE REALTIME CACHE INVALIDATION (GHOST RECORD FIX)
+  // ------------------------------------------------------------------
   useEffect(() => {
     const channel = supabase
       .channel('feeding-db-changes')
@@ -88,8 +101,8 @@ export function FeedingSchedulePage() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'feeding_schedules' },
         (payload) => {
-          // AUDIT FIX 2A: Restrict invalidation to active queries to prevent cache thrashing
-          queryClient.invalidateQueries({ queryKey: ['feeding_schedules'], refetchType: 'active' });
+          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
+          queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
         }
       )
       .subscribe();
@@ -171,28 +184,15 @@ export function FeedingSchedulePage() {
       occurrences: 5
     },
     onSubmit: async ({ value }) => {
-      setErrorMsg(null);
-      try {
         let datesToSchedule: string[] = [];
 
-        // AUDIT FIX 1A: Strict local Date math decoupling to prevent UTC timezone drift
         if (value.schedule_mode === 'single') {
             datesToSchedule.push(value.target_date);
         } else {
-            const [y, m, d] = value.target_date.split('-').map(Number);
-            const startDate = new Date(y, m - 1, d);
-            
-            // AUDIT FIX 3B: Hard cap on occurrences to prevent UI/DB flooding
-            const safeOccurrences = Math.min(value.occurrences, 60);
-
-            for (let i = 0; i < safeOccurrences; i++) {
-                const nextDate = new Date(startDate);
-                nextDate.setDate(startDate.getDate() + (i * value.interval_days));
-                
-                const ny = nextDate.getFullYear();
-                const nm = String(nextDate.getMonth() + 1).padStart(2, '0');
-                const nd = String(nextDate.getDate()).padStart(2, '0');
-                datesToSchedule.push(`${ny}-${nm}-${nd}`);
+            const startDate = parseISO(value.target_date);
+            for (let i = 0; i < value.occurrences; i++) {
+                const nextFeedDate = addDays(startDate, i * value.interval_days);
+                datesToSchedule.push(format(nextFeedDate, 'yyyy-MM-dd'));
             }
         }
 
@@ -209,36 +209,26 @@ export function FeedingSchedulePage() {
             is_deleted: false,
         }));
 
-        if (!user?.id) throw new Error('User context unavailable');
-        
+        if (!user?.id) return;
         await feedingService.bulkCreateSchedules(newSchedules as any, user.id);
         queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
         form.reset();
-
-      } catch (err: any) {
-        console.error('Failed to generate schedules:', err);
-        setErrorMsg(err.message || 'Failed to generate feeding schedules. Please check connection.');
-      }
     }
   });
 
   const inputClass = "w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all shadow-sm";
 
+  // ------------------------------------------------------------------
+  // 4. VIRTUALIZER ENGINE (DOM PROTECTION WITHOUT UI/UX SHIFT)
+  // ------------------------------------------------------------------
   const activeList = viewLayout === 'individual' ? displayedSchedules : groupedSchedules;
 
   const rowVirtualizer = useVirtualizer({
     count: activeList.length,
     getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 64,
+    estimateSize: () => 64, // Approximate row height
     overscan: 5,
   });
-
-  // AUDIT FIX 2B: Ensure resizing the browser/tablet dynamically recalibrates the layout
-  useEffect(() => {
-    const handleResize = () => { rowVirtualizer.measure(); };
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, [rowVirtualizer]);
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
@@ -263,13 +253,6 @@ export function FeedingSchedulePage() {
            <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest mb-6 flex items-center gap-2 border-b border-slate-100 pb-4">
               <Plus size={16} className="text-emerald-600"/> Generate Schedules
            </h4>
-
-           {errorMsg && (
-             <div className="mb-4 p-3 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-2 text-rose-700 text-xs font-medium">
-               <AlertCircle size={16} className="shrink-0 mt-0.5" />
-               <div>{errorMsg}</div>
-             </div>
-           )}
 
            <div className="flex overflow-x-auto scrollbar-hide bg-slate-50 p-1.5 rounded-xl gap-1 mb-5 border border-slate-200">
               {categories.map(cat => (
@@ -363,7 +346,7 @@ export function FeedingSchedulePage() {
                                   <form.Field name="occurrences" children={(field) => (
                                       <div>
                                           <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Occurrences</label>
-                                          <input type="number" min="1" max="60" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                                          <input type="number" min="1" max="50" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
                                       </div>
                                   )}/>
                               </div>
@@ -442,13 +425,9 @@ export function FeedingSchedulePage() {
                                   if (viewLayout === 'individual') {
                                       const schedule = item as FeedingScheduleType;
                                       const animal = animals.find(a => a.id === schedule.animal_id);
-                                      const [y, m, d] = schedule.scheduled_date.split('-').map(Number);
-                                      const dateObj = new Date(y, m - 1, d);
+                                      const dateObj = parseISO(schedule.scheduled_date);
                                       const isToday = schedule.scheduled_date === getLocalDateString();
                                       const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
-                                      
-                                      // AUDIT FIX 1B: Explicit row-level lock check
-                                      const isDeleting = deleteSingleMutation.isPending && deleteSingleMutation.variables === schedule.id;
 
                                       return (
                                           <tr key={schedule.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
@@ -473,10 +452,10 @@ export function FeedingSchedulePage() {
                                               <td className="px-6 py-4 text-right">
                                                   <button 
                                                     onClick={() => deleteSingleMutation.mutate(schedule.id!)}
-                                                    disabled={isDeleting}
+                                                    disabled={deleteSingleMutation.isPending}
                                                     className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
                                                   >
-                                                      {isDeleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                      {deleteSingleMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                                   </button>
                                               </td>
                                           </tr>
@@ -484,13 +463,8 @@ export function FeedingSchedulePage() {
                                   } else {
                                       const group = item as any;
                                       const animal = animals.find(a => a.id === group.animal_id);
-                                      const [sy, sm, sd] = group.start_date.split('-').map(Number);
-                                      const startDateObj = new Date(sy, sm - 1, sd);
-                                      const [ey, em, ed] = group.end_date.split('-').map(Number);
-                                      const endDateObj = new Date(ey, em - 1, ed);
-
-                                      // AUDIT FIX 1B: Group-level specific locking
-                                      const isDeletingGroup = deleteGroupMutation.isPending && deleteGroupMutation.variables === group.child_ids;
+                                      const startDateObj = parseISO(group.start_date);
+                                      const endDateObj = parseISO(group.end_date);
 
                                       return (
                                           <tr key={virtualRow.index} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
@@ -522,11 +496,11 @@ export function FeedingSchedulePage() {
                                               <td className="px-6 py-4 text-right">
                                                   <button 
                                                     onClick={() => deleteGroupMutation.mutate(group.child_ids)}
-                                                    disabled={isDeletingGroup}
+                                                    disabled={deleteGroupMutation.isPending}
                                                     className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50" 
                                                     title="Delete entire group"
                                                   >
-                                                      {isDeletingGroup ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                      {deleteGroupMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                                                   </button>
                                               </td>
                                           </tr>

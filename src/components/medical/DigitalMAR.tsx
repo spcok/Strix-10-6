@@ -2,21 +2,21 @@ import React, { useState, useMemo } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../lib/auth';
-import { format, startOfDay, endOfDay, parse, formatISO } from 'date-fns';
+import { format, startOfDay, endOfDay } from 'date-fns';
 import { Clock, Check, X, AlertTriangle, Loader2 } from 'lucide-react';
-import { Prescription, MedicationAdministration } from '../../types';
 
 interface DigitalMARProps {
-  prescriptions: Prescription[];
+  prescriptions: any[];
   isOnline: boolean;
 }
 
+// Determines how many empty boxes to render based on veterinary frequency
 const getExpectedSlots = (freq: string) => {
   switch (freq) {
     case 'BID': return 2;
     case 'TID': return 3;
     case 'QID': return 4;
-    default: return 1; 
+    default: return 1; // SID, EOD, WEEKLY, MONTHLY, STAT
   }
 };
 
@@ -25,25 +25,27 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
   const { user } = useAuth();
   const [selectedDate, setSelectedDate] = useState(new Date());
   
-  const [activeSlot, setActiveSlot] = useState<{ rx: Prescription, slotIndex: number } | null>(null);
+  // Modal State
+  const [activeSlot, setActiveSlot] = useState<{ rx: any, slotIndex: number } | null>(null);
   const [adminStatus, setAdminStatus] = useState('GIVEN');
   const [adminTime, setAdminTime] = useState(format(new Date(), 'HH:mm'));
   const [adminStaffId, setAdminStaffId] = useState(user?.id || '');
   const [adminNotes, setAdminNotes] = useState('');
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // ISSUE 6: Removed `.eq('is_deleted', false)` to preserve audit trails for soft-deleted staff
+  // Fetch Staff Directory for the Dropdown
   const { data: staff = [] } = useQuery({
     queryKey: ['staff_directory_mar'],
     queryFn: async () => {
-      const { data, error } = await supabase.from('users').select('id, name, initials');
+      const { data, error } = await supabase.from('users').select('id, name, initials').eq('is_deleted', false);
       if (error) throw error;
       return data;
     },
     networkMode: 'offlineFirst',
   });
 
-  const { data: administrations = [] } = useQuery({
+  // Fetch today's administration events
+  const { data: administrations = [], isLoading: loadingAdmins } = useQuery({
     queryKey: ['medication_administrations', format(selectedDate, 'yyyy-MM-dd')],
     queryFn: async () => {
       const start = startOfDay(selectedDate).toISOString();
@@ -55,11 +57,12 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
         .lte('administered_at', end)
         .order('administered_at', { ascending: true });
       if (error) throw error;
-      return data as MedicationAdministration[];
+      return data;
     },
     networkMode: 'offlineFirst',
   });
 
+  // Map user names in memory to avoid complex Foreign Key joins failing
   const staffMap = useMemo(() => {
     const map = new Map();
     staff.forEach((s: any) => map.set(s.id, s));
@@ -69,32 +72,29 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
   const saveMutation = useMutation({
     mutationFn: async () => {
       if (!activeSlot) return;
-      if (!isOnline) throw new Error("Database disconnected. Administration is locked.");
-
-      // ISSUE 4: Strict Timezone serialization using date-fns parse
+      
+      // Combine selected date with selected time
       const dateStr = format(selectedDate, 'yyyy-MM-dd');
-      const parsedDateTime = parse(`${dateStr} ${adminTime}`, 'yyyy-MM-dd HH:mm', selectedDate);
-      const administeredAt = formatISO(parsedDateTime);
+      const administeredAt = new Date(`${dateStr}T${adminTime}:00`).toISOString();
 
-      const payload: Partial<MedicationAdministration> = {
-        prescription_id: activeSlot.rx.id!,
+      const payload = {
+        prescription_id: activeSlot.rx.id,
         animal_id: activeSlot.rx.animal_id,
         administered_at: administeredAt,
         status: adminStatus,
         administered_by: adminStaffId,
         notes: adminNotes || null,
+        // Secretly log who ACTUALLY pushed the button for the audit trail
         created_by: user?.id 
       };
 
       const { error } = await supabase.from('medication_administrations').insert([payload]);
       if (error) throw error;
     },
-    onMutate: async () => {
-      // ISSUE 17: Immediate Optimistic UI close
-      setActiveSlot(null);
-      setSaveError(null);
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['medication_administrations'] });
+      closeModal();
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['medication_administrations'] }),
     onError: (err: any) => setSaveError(err.message || "Failed to log administration")
   });
 
@@ -106,9 +106,8 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
     setSaveError(null);
   };
 
-  const handleOpenSlot = (rx: Prescription, slotIndex: number) => {
+  const handleOpenSlot = (rx: any, slotIndex: number) => {
     setActiveSlot({ rx, slotIndex });
-    // ISSUE 3: Dynamically sync active user ID to override race conditions
     setAdminStaffId(user?.id || '');
     setAdminTime(format(new Date(), 'HH:mm'));
   };
@@ -116,6 +115,7 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
   return (
     <div className="space-y-6">
       
+      {/* Date Header */}
       <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex justify-between items-center">
         <div>
           <h2 className="text-lg font-black text-slate-900 uppercase tracking-tight">Daily Administration Grid</h2>
@@ -129,6 +129,7 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
         />
       </div>
 
+      {/* MAR Grid */}
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
         {prescriptions.length === 0 ? (
           <div className="p-12 text-center text-slate-400 text-xs font-black uppercase tracking-widest">No Active Prescriptions</div>
@@ -136,13 +137,13 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
           <div className="divide-y divide-slate-100">
             {prescriptions.map((rx) => {
               const expectedSlots = getExpectedSlots(rx.frequency);
-              // ISSUE 5: Chronologically sort the dose administration arrays to prevent out-of-order index bugs
-              const rxAdmins = administrations
-                .filter(a => a.prescription_id === rx.id)
-                .sort((a, b) => new Date(a.administered_at).getTime() - new Date(b.administered_at).getTime());
+              // Filter admins for this specific prescription chronologically
+              const rxAdmins = administrations.filter((a: any) => a.prescription_id === rx.id);
 
               return (
                 <div key={rx.id} className="p-4 flex flex-col md:flex-row md:items-center gap-6 hover:bg-slate-50 transition-colors">
+                  
+                  {/* Demographics & Drug Info */}
                   <div className="md:w-1/3 shrink-0">
                     <h3 className="font-black text-slate-900 text-base leading-tight">
                       {rx.drug_name} <span className="text-blue-600 ml-1">{rx.dosage}</span>
@@ -155,11 +156,13 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
                     )}
                   </div>
 
+                  {/* Pre-generated Slots */}
                   <div className="flex-1 flex flex-wrap gap-3">
                     {Array.from({ length: expectedSlots }).map((_, idx) => {
                       const completedAdmin = rxAdmins[idx];
 
                       if (completedAdmin) {
+                        // Slot is Completed
                         const isGiven = completedAdmin.status === 'GIVEN';
                         const staffMember = staffMap.get(completedAdmin.administered_by);
                         const displayTime = format(new Date(completedAdmin.administered_at), 'HH:mm');
@@ -177,12 +180,13 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
                         );
                       }
 
+                      // Slot is Empty / Pending
                       return (
                         <button 
                           key={idx} 
                           onClick={() => handleOpenSlot(rx, idx)}
                           disabled={!isOnline}
-                          className="flex items-center justify-center p-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 text-slate-400 transition-all w-48 shrink-0 group disabled:opacity-50"
+                          className="flex items-center justify-center p-3 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 hover:bg-blue-50 hover:border-blue-300 hover:text-blue-700 text-slate-400 transition-all w-48 shrink-0 group disabled:opacity-50 disabled:hover:bg-slate-50 disabled:hover:border-slate-300 disabled:hover:text-slate-400"
                         >
                           <span className="text-[10px] font-black uppercase tracking-widest group-hover:scale-105 transition-transform flex items-center gap-1.5">
                             <Clock size={14} /> Sign Off Dose {idx + 1}
@@ -198,9 +202,11 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
         )}
       </div>
 
+      {/* Administration Modal */}
       {activeSlot && (
         <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col border border-slate-200">
+            
             <div className="px-5 py-4 border-b border-slate-100 bg-slate-50 flex justify-between items-center">
               <div>
                 <h3 className="font-black text-slate-900 uppercase tracking-tight">Log Administration</h3>
@@ -210,7 +216,9 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
             </div>
 
             <div className="p-5 space-y-5">
-              {saveError && <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs font-bold">{saveError}</div>}
+              {saveError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-700 text-xs font-bold">{saveError}</div>
+              )}
 
               <div>
                 <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5">Clinical Status</label>
@@ -255,6 +263,7 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
                   className="w-full bg-white border border-slate-200 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-900 outline-none focus:border-blue-500 shadow-sm resize-none custom-scrollbar" 
                 />
               </div>
+
             </div>
 
             <div className="px-5 py-4 border-t border-slate-100 bg-slate-50 flex justify-end gap-3">
@@ -268,9 +277,11 @@ export default function DigitalMAR({ prescriptions, isOnline }: DigitalMARProps)
                 Sign Off Dose
               </button>
             </div>
+            
           </div>
         </div>
       )}
+
     </div>
   );
 }

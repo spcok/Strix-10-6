@@ -7,6 +7,7 @@ import { dailyLogService } from '../../services/dailyLogService';
 import { supabase } from '../../lib/supabase';
 import { Animal, DailyLog } from '../../types';
 
+// --- AUDIT FIX #9: Offline-safe UUID generator ---
 const generateOfflineUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
   return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
@@ -29,8 +30,8 @@ interface MealInput {
   food_item: string;
   feed_method: string;
   time: string;
-  quantity: string | number;
-  unit: 'Whole' | 'g';
+  quantity_offered: string | number;
+  quantity_consumed: string | number;
   calci_dust_added: boolean;
 }
 
@@ -103,6 +104,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
   const foodTypes = useMemo(() => operationalLists.filter((l: any) => l.category === 'food_type' && taxonomicMatch.includes(l.description)), [operationalLists, animal.category]);
   const feedMethods = useMemo(() => operationalLists.filter((l: any) => l.category === 'feed_method' && taxonomicMatch.includes(l.description)), [operationalLists, animal.category]);
 
+  // --- AUDIT FIX #11: Correct eighths rounding boundary ---
   const unpackGramsToImperial = (grams: number | null, unit: string) => {
     if (!grams) return { lbs: '', oz: '', eighths: '0' };
     const totalOunces = grams / 28.3495;
@@ -122,47 +124,35 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
     return { lbs: '', oz: '', eighths: '0' };
   };
 
-  // --- BUG FIX: Safely parse JSON strings from Supabase to load into the form ---
-  const getParsedFeedDetails = () => {
-    if (!initialLogData?.feed_details) return { meals: [], initials: '' };
-    if (typeof initialLogData.feed_details === 'string') {
-      try {
-        return JSON.parse(initialLogData.feed_details);
-      } catch (e) {
-        return { meals: [], initials: '' };
-      }
-    }
-    return initialLogData.feed_details;
-  };
-
-  const parsedFeedData = getParsedFeedDetails();
   const initialImperial = unpackGramsToImperial(initialLogData?.weight_grams || null, animal.weight_unit || 'g');
 
   const initialMeals = (): MealInput[] => {
     if (mode !== 'FEEDING') return [];
-    const existing = parsedFeedData.meals || [];
+    const existing = initialLogData?.feed_details?.meals || [];
     if (existing.length > 0) {
       return existing.map((m: any) => ({
         id: generateOfflineUUID(),
         food_item: m.food_item || '',
         feed_method: m.feed_method || '',
-        quantity: m.quantity?.toString() || m.quantity_consumed?.toString() || m.food_consumed_g?.toString() || '',
-        unit: m.unit || 'Whole',
+        quantity_offered: m.quantity_offered?.toString() || m.food_offered_g?.toString() || '',
+        quantity_consumed: m.quantity_consumed?.toString() || m.food_consumed_g?.toString() || '',
         calci_dust_added: !!m.calci_dust_added,
         time: m.time ? format(new Date(m.time), 'HH:mm') : format(new Date(), 'HH:mm')
       }));
     }
-    return [{ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity: '', unit: 'Whole', calci_dust_added: false, time: format(new Date(), 'HH:mm') }];
+    return [{ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity_offered: '', quantity_consumed: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') }];
   };
 
   const logMutation = useMutation({
     mutationFn: async (value: any) => {
+      // --- AUDIT FIX #13: Safe time parsing fallback ---
       const safeTime = (value.log_time || '12:00').substring(0, 5); 
       const localDate = parse(`${value.log_date} ${safeTime}`, 'yyyy-MM-dd HH:mm', new Date());
       const combinedTimestamp = localDate.toISOString();
 
       let finalWeightGrams: number | null = null;
       if (mode === 'WEIGHT' && !value.weight_not_required) {
+        // --- AUDIT FIX #10: Aggressive sanitization of numeric inputs to prevent NaN ---
         const safeParse = (val: any) => parseFloat(String(val || '0').replace(/[^0-9.]/g, '')) || 0;
         
         if (animal.weight_unit === 'lb') {
@@ -184,8 +174,8 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
             time: mealLocalTime.toISOString(),
             food_item: m.food_item,
             feed_method: m.feed_method,
-            quantity: Number(String(m.quantity || '0').replace(/[^0-9.]/g, '')),
-            unit: m.unit,
+            quantity_offered: Number(String(m.quantity_offered || '0').replace(/[^0-9.]/g, '')),
+            quantity_consumed: Number(String(m.quantity_consumed || '0').replace(/[^0-9.]/g, '')),
             calci_dust_added: m.calci_dust_added
           };
         });
@@ -241,6 +231,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       const localDate = parse(`${variables.log_date} ${safeTime}`, 'yyyy-MM-dd HH:mm', new Date());
       const finalNotes = variables.initials && mode !== 'FEEDING' ? `[${variables.initials}] ${variables.notes || ''}`.trim() : variables.notes || '';
       
+      // --- AUDIT FIX #5: Pass full telemetry data to cache to prevent cell blanking ---
       let optimisticGrams = null;
       if (mode === 'WEIGHT' && !variables.weight_not_required) {
         const safeParse = (val: any) => parseFloat(String(val || '0').replace(/[^0-9.]/g, '')) || 0;
@@ -263,6 +254,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
         _isOptimistic: true
       };
 
+      // --- AUDIT FIX #4: Replace existing row by Animal ID to prevent duplication flashing ---
       queryClient.setQueryData<DailyLog[]>(['daily_logs'], (old) => {
         if (!old) return [optimisticRecord as DailyLog];
         
@@ -289,9 +281,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
     },
     
     onSettled: () => {
-      // --- BUG FIX: Force dashboard to wipe its cache and grab the historical feed update! ---
       queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
-      queryClient.invalidateQueries({ queryKey: ['recent_feeds'] });
     }
   });
 
@@ -299,7 +289,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
     defaultValues: {
       log_date: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'yyyy-MM-dd') : format(new Date(), 'yyyy-MM-dd'),
       log_time: initialLogData?.log_date ? format(new Date(initialLogData.log_date), 'HH:mm') : format(new Date(), 'HH:mm'),
-      initials: parsedFeedData.initials || '',
+      initials: initialLogData?.feed_details?.initials || '',
       notes: initialLogData?.notes?.replace(/^\[.*?\]\s*/, '') || '',
       lbs: initialImperial.lbs, oz: initialImperial.oz, eighths: initialImperial.eighths,
       metric_weight: animal.weight_unit === 'kg' && initialLogData?.weight_grams ? (initialLogData.weight_grams / 1000).toString() : initialLogData?.weight_grams?.toString() || '',
@@ -311,6 +301,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
       _optimisticId: '' 
     },
     onSubmit: async ({ value }) => {
+      // --- AUDIT FIX #6: Double-tap race condition guard ---
       if (logMutation.isPending) return;
       setErrorMsg(null);
       logMutation.mutate(value);
@@ -348,6 +339,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
           <form id="quick-log-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-5">
             
+            {/* UI UPGRADE: Flex-row forces Date, Time, and Initials onto a single proportional line */}
             <div className="flex flex-row items-end gap-2 md:gap-3 bg-slate-50 border border-slate-100 p-2 md:p-3 rounded-xl">
               <div className="flex-[2] min-w-0">
                 <form.Field name="log_date">{(field) => <FormInput field={field} label="Date" type="date" />}</form.Field>
@@ -442,7 +434,7 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
                         <span className="text-[10px] font-black text-amber-800 uppercase tracking-widest bg-amber-50 px-2 py-1 rounded">Rations Logged</span>
                         <button
                           type="button"
-                          onClick={() => field.pushValue({ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity: '', unit: 'Whole', calci_dust_added: false, time: format(new Date(), 'HH:mm') })}
+                          onClick={() => field.pushValue({ id: generateOfflineUUID(), food_item: '', feed_method: '', quantity_offered: '', quantity_consumed: '', calci_dust_added: false, time: format(new Date(), 'HH:mm') })}
                           className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-amber-100 transition-colors shadow-sm"
                         >
                           <Plus size={12} /> Add Row
@@ -469,10 +461,8 @@ export default function DailyLogFormModal({ isOpen, onClose, animal, mode, initi
 
                             <div className="grid grid-cols-3 gap-2">
                               <form.Field name={`meals[${index}].time` as const}>{(subField) => <FormInput field={subField} label="Time" type="time" />}</form.Field>
-                              <form.Field name={`meals[${index}].quantity` as const}>{(subField) => <FormInput field={subField} label="Qty" type="number" />}</form.Field>
-                              <form.Field name={`meals[${index}].unit` as const}>
-                                {(subField) => <FormSelect field={subField} label="Unit" options={[{ value: 'Whole', label: 'Whole' }, { value: 'g', label: 'Grams' }]} />}
-                              </form.Field>
+                              <form.Field name={`meals[${index}].quantity_offered` as const}>{(subField) => <FormInput field={subField} label="Offered (g)" type="number" />}</form.Field>
+                              <form.Field name={`meals[${index}].quantity_consumed` as const}>{(subField) => <FormInput field={subField} label="Consum (g)" type="number" />}</form.Field>
                             </div>
 
                             <div className="pt-2 border-t border-slate-100">

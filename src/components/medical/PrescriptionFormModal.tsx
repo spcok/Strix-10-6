@@ -4,12 +4,11 @@ import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
 import { X, Save, Loader2, AlertCircle, Pill } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../lib/auth';
-import { Prescription } from '../../types';
 
 interface PrescriptionFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialData?: Prescription | null; 
+  initialData?: any; 
 }
 
 function FormInput({ field, label, type = 'text', placeholder, required = false }: { field: any; label: string; type?: string; placeholder?: string; required?: boolean }) {
@@ -62,8 +61,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
   const { user } = useAuth();
   const [saveError, setSaveError] = useState<string | null>(null);
 
-  // ISSUE 15: Added isError boundary for essential dropdown dependencies
-  const { data: animals = [], isError: animalQueryError } = useQuery({
+  const { data: animals = [] } = useQuery({
     queryKey: ['animals', 'active'],
     queryFn: async () => {
       const { data, error } = await supabase.from('animals').select('id, name, species, location').neq('status', 'ARCHIVED').order('name');
@@ -73,7 +71,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
   });
 
   const saveMutation = useMutation({
-    mutationFn: async (payload: Partial<Prescription>) => {
+    mutationFn: async (payload: any) => {
       if (initialData?.id) {
         const { data, error } = await supabase.from('prescriptions').update(payload).eq('id', initialData.id).select().single();
         if (error) throw error;
@@ -98,7 +96,7 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
       dosage: initialData?.dosage || '',
       route: initialData?.route || 'PO',
       frequency: initialData?.frequency || 'SID',
-      is_prn: initialData?.is_prn || false, 
+      is_prn: false, // Force false, stripped from UI
       indication: initialData?.indication || '',
       special_instructions: initialData?.special_instructions || '',
       start_date: initialData?.start_date || new Date().toISOString().split('T')[0],
@@ -109,27 +107,16 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
     onSubmit: async ({ value }) => {
       setSaveError(null);
       try {
-        if (!user?.id) throw new Error("Active user session required to authorize prescriptions.");
-
-        // ISSUE 9: Explicit cross-field range validation
-        if (value.end_date && new Date(value.end_date) < new Date(value.start_date)) {
-          throw new Error("End date cannot logically occur before the start date.");
-        }
-
-        const payload: Partial<Prescription> = { ...value, is_prn: value.is_prn };
-        
-        if (!payload.end_date) payload.end_date = null;
+        const payload = { ...value } as any;
+        if (payload.end_date === '') payload.end_date = null;
         if (payload.order_type !== 'PRESCRIPTION') {
           payload.prescribing_vet_name = null;
           payload.prescribing_clinic = null;
         } else {
-          if (!payload.prescribing_vet_name) payload.prescribing_vet_name = null;
-          if (!payload.prescribing_clinic) payload.prescribing_clinic = null;
+          if (payload.prescribing_vet_name === '') payload.prescribing_vet_name = null;
+          if (payload.prescribing_clinic === '') payload.prescribing_clinic = null;
         }
-        
-        if (!initialData?.id) {
-          payload.internal_authorizing_user = user.id;
-        }
+        if (!initialData?.id && user) payload.internal_authorizing_user = user.id;
 
         await saveMutation.mutateAsync(payload);
         onClose();
@@ -159,13 +146,6 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
         </div>
 
         <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-white">
-          {animalQueryError && (
-            <div className="mb-4 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-700">
-              <AlertCircle size={18} className="shrink-0 mt-0.5" />
-              <div className="text-sm font-medium">Failed to establish connection to the patient directory.</div>
-            </div>
-          )}
-          
           {saveError && (
             <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-700">
               <AlertCircle size={18} className="shrink-0 mt-0.5" />
@@ -173,22 +153,14 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
             </div>
           )}
 
-          {/* ISSUE 16: Silent Validation Failures are now exposed globally via form subscriber */}
-          <form.Subscribe selector={(state) => state.meta.errors}>
-             {(errors) => errors.length > 0 && (
-               <div className="mb-6 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-xs font-bold flex gap-2">
-                 <AlertCircle size={16} /> <span>Please correct the highlighted validation errors below.</span>
-               </div>
-             )}
-          </form.Subscribe>
-
           <form id="rx-mutation-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-6">
+            
             <div className="bg-slate-50 p-5 rounded-2xl border border-slate-200">
                <form.Field name="animal_id" validators={{ onChange: ({ value }) => !value ? 'Animal is required' : undefined }}>
                  {(field) => (
                    <FormSelect 
                      field={field as any} 
-                     label="Select Patient" 
+                     label="Select Animal" 
                      required 
                      options={animals.map((a: any) => ({ value: a.id, label: `${a.name} (${a.species}) - ${a.location || 'No Loc'}` }))} 
                    />
@@ -238,7 +210,6 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
                <form.Field name="dosage" validators={{ onChange: ({ value }) => !value ? 'Dosage is required' : undefined }}>
                  {(field) => <FormInput field={field as any} label="Dosage Amount" required placeholder="e.g. 0.3ml or 1 tablet" />}
                </form.Field>
-               
                <form.Field name="route">
                  {(field) => (
                    <FormSelect 
@@ -253,32 +224,21 @@ export default function PrescriptionFormModal({ isOpen, onClose, initialData }: 
                    />
                  )}
                </form.Field>
-               
-               <div className="space-y-4">
-                 <form.Field name="frequency">
-                   {(field) => (
-                     <FormSelect 
-                       field={field as any} 
-                       label="Frequency" 
-                       required
-                       options={[
-                         { value: 'SID', label: 'Once Daily (SID)' }, { value: 'BID', label: 'Twice Daily (BID)' }, { value: 'TID', label: 'Three Times Daily (TID)' },
-                         { value: 'QID', label: 'Four Times Daily (QID)' }, { value: 'EOD', label: 'Every Other Day (EOD)' }, { value: 'STAT', label: 'Immediate Single Dose (STAT)' },
-                         { value: 'WEEKLY', label: 'Once Weekly' }, { value: 'MONTHLY', label: 'Once Monthly' }
-                       ]} 
-                     />
-                   )}
-                 </form.Field>
-
-                 <form.Field name="is_prn">
-                    {(field) => (
-                      <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
-                        <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-blue-600 bg-white rounded border-slate-300 focus:ring-blue-500/50" />
-                        <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">PRN (As Needed)</span>
-                      </div>
-                    )}
-                 </form.Field>
-               </div>
+               {/* FIX: Removed PRN from Frequency Options entirely */}
+               <form.Field name="frequency">
+                 {(field) => (
+                   <FormSelect 
+                     field={field as any} 
+                     label="Frequency" 
+                     required
+                     options={[
+                       { value: 'SID', label: 'Once Daily (SID)' }, { value: 'BID', label: 'Twice Daily (BID)' }, { value: 'TID', label: 'Three Times Daily (TID)' },
+                       { value: 'QID', label: 'Four Times Daily (QID)' }, { value: 'EOD', label: 'Every Other Day (EOD)' }, { value: 'STAT', label: 'Immediate Single Dose (STAT)' },
+                       { value: 'WEEKLY', label: 'Once Weekly' }, { value: 'MONTHLY', label: 'Once Monthly' }
+                     ]} 
+                   />
+                 )}
+               </form.Field>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6 pt-6 border-t border-slate-100">

@@ -17,6 +17,7 @@ const getLocalDateString = () => {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 };
 
+// UNIVERSAL WEIGHT TRANSLATOR
 export const formatWeightDisplay = (grams: number | null | undefined, unit: string) => {
   if (!grams) return null;
   if (unit === 'kg') return `${(grams / 1000).toFixed(2)}kg`;
@@ -39,17 +40,6 @@ export const formatWeightDisplay = (grams: number | null | undefined, unit: stri
     return `${oz}${eighthsStr}oz`;
   }
   return `${Math.round(grams)}g`;
-};
-
-// Helper function to safely extract the meals array from ANY log row
-const extractMeals = (log: DailyLog) => {
-  if (!log?.feed_details) return [];
-  try {
-    const parsed = typeof log.feed_details === 'string' ? JSON.parse(log.feed_details) : log.feed_details;
-    return parsed?.meals || [];
-  } catch {
-    return [];
-  }
 };
 
 const columnHelper = createColumnHelper<Animal>();
@@ -93,25 +83,6 @@ export function Dashboard() {
     meta: { persist: true },
   });
 
-  // DATA FIX: Removed .eq('log_type', 'FEEDING') filter. It now grabs ANY historical log that contains a JSON feed block.
-  const { data: recentFeedLogs = [] } = useQuery({
-    queryKey: ['recent_feeds', 'dashboard', viewDate],
-    queryFn: async () => {
-      const startOfDay = new Date(`${viewDate}T00:00:00`);
-      const { data, error } = await supabase
-        .from('daily_logs')
-        .select('*')
-        .eq('is_deleted', false)
-        .not('feed_details', 'is', null)
-        .lt('log_date', startOfDay.toISOString())
-        .order('log_date', { ascending: false })
-        .limit(2000); 
-      if (error) throw error;
-      return data as DailyLog[];
-    },
-    meta: { persist: true },
-  });
-
   const selectedAnimal = useMemo(() => selectedAnimalId ? allAnimals.find(a => a.id === selectedAnimalId) || null : null, [allAnimals, selectedAnimalId]);
 
   useEffect(() => {
@@ -123,7 +94,6 @@ export function Dashboard() {
     const logsChannel = supabase.channel('dashboard-logs')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_logs' }, () => {
         queryClient.invalidateQueries({ queryKey: ['daily_logs', 'dashboard'] });
-        queryClient.invalidateQueries({ queryKey: ['recent_feeds', 'dashboard'] });
       }).subscribe();
 
     return () => { 
@@ -134,32 +104,11 @@ export function Dashboard() {
 
   const hierarchicalData = useMemo(() => {
     const logMap = new Map<string, DailyLog>();
-    todaysLogs.forEach(log => {
-      // Defensive mapping: If multiple logs somehow exist for today, ensure we prioritize the one with actual meals
-      const existing = logMap.get(log.animal_id);
-      if (existing) {
-        const existingMeals = extractMeals(existing);
-        const newMeals = extractMeals(log);
-        if (existingMeals.length > 0 && newMeals.length === 0) return;
-      }
-      logMap.set(log.animal_id, log);
-    });
-
-    const lastFeedMap = new Map<string, DailyLog>();
-    recentFeedLogs.forEach(log => {
-        if (!lastFeedMap.has(log.animal_id)) {
-            // DATA FIX: STRICTLY filter out logs that have empty meal arrays `{meals: []}` from blocking the map
-            const meals = extractMeals(log);
-            if (meals.length > 0) {
-              lastFeedMap.set(log.animal_id, log);
-            }
-        }
-    });
+    todaysLogs.forEach(log => logMap.set(log.animal_id, log));
 
     let baseData = allAnimals.map(a => ({
       ...a,
-      today_log: logMap.get(a.id),
-      last_feed_log: lastFeedMap.get(a.id)
+      today_log: logMap.get(a.id)
     }));
 
     if (activeTab === 'ARCHIVED') baseData = baseData.filter(a => a.status === 'ARCHIVED');
@@ -176,7 +125,7 @@ export function Dashboard() {
       else orphans.push(ind);
     });
     return [...Array.from(groupMap.values()), ...orphans];
-  }, [allAnimals, todaysLogs, recentFeedLogs, activeTab]);
+  }, [allAnimals, todaysLogs, activeTab]);
 
   const totalInView = hierarchicalData.length;
 
@@ -188,8 +137,6 @@ export function Dashboard() {
         const isGroup = info.row.original.record_type === 'GROUP';
         const canExpand = info.row.getCanExpand();
         const avatarUrl = (info.row.original as any).avatar_url;
-        const explicitLatinName = (info.row.original as any).latin_name || (info.row.original as any).scientific_name;
-
         return (
           <div className="flex items-start lg:items-center gap-3 w-full" style={{ paddingLeft: `${info.row.depth * 1.5}rem` }}>
             <div className="flex items-center justify-center w-6 shrink-0 mt-1 lg:mt-0">
@@ -214,9 +161,8 @@ export function Dashboard() {
                 <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200 shrink-0">Mob</span>
               )}
               
-              {/* MOBILE ONLY FALLBACK */}
               <span className="lg:hidden text-[11px] font-bold text-slate-500 italic truncate max-w-[130px] shrink-0">
-                {explicitLatinName || '--'}
+                {(info.row.original as any).scientific_name || info.row.original.species || 'Unknown Species'}
               </span>
               
               <span className="lg:hidden text-[9px] font-black text-slate-600 uppercase tracking-widest flex items-center gap-1 bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200 shadow-sm shrink-0">
@@ -229,14 +175,10 @@ export function Dashboard() {
       },
     });
 
-    const latinNameColumn = columnHelper.accessor('id', {
-      id: 'latin_name', // Changed ID from 'species' to break the default fallback
+    const latinNameColumn = columnHelper.accessor('species', {
+      id: 'species',
       header: 'Latin Taxonomy',
-      cell: info => {
-        // STRICT TAXONOMY FIX: Forces only the DB latin/scientific name to show. Never the common name.
-        const explicitLatinName = (info.row.original as any).latin_name || (info.row.original as any).scientific_name;
-        return <span className="text-xs font-bold text-slate-500 italic block truncate">{explicitLatinName && explicitLatinName.trim() !== '' ? explicitLatinName : '--'}</span>;
-      }
+      cell: info => <span className="text-xs font-bold text-slate-500 italic block truncate">{(info.row.original as any).scientific_name || info.row.original.species || 'Unknown Scientific Name'}</span>
     });
 
     const locationColumn = columnHelper.display({
@@ -245,54 +187,39 @@ export function Dashboard() {
       cell: info => (
         <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest flex items-center gap-1.5 bg-slate-100 px-2.5 py-1.5 rounded-lg w-fit border border-slate-200 shadow-sm">
           <MapPin size={12} className="text-slate-400 shrink-0" />
-          <span className="truncate">{(info.row.original as any).location || 'Unknown'}</span>
+          <span className="truncate">{(info.row.original as any).location || 'Unknown Enclosure'}</span>
         </span>
       )
     });
 
-    const renderTodaysFeed = (log?: DailyLog) => {
-      const meals = log ? extractMeals(log) : [];
-      if (meals.length === 0) return <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">--</span>;
+    const renderFeedData = (log?: DailyLog) => {
+      const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
+      const meals = feedParsed?.meals || [];
+      const lastMeal = meals.length > 0 ? meals[meals.length - 1] : null;
+
+      if (!lastMeal) return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">No Feed Logged</span>;
+      
+      const timeFormatted = lastMeal.time ? new Date(lastMeal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '--:--';
+      const qty = lastMeal.quantity_offered || lastMeal.food_offered_g;
+      const qtyStr = qty ? ` (${qty}g)` : '';
       
       return (
-        <div className="flex flex-col gap-1.5 w-full">
-          {meals.map((meal: any, idx: number) => {
-            const timeFormatted = meal.time ? new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '--:--';
-            const qty = meal.quantity || meal.quantity_consumed || meal.food_consumed_g || meal.quantity_offered || meal.food_offered_g;
-            const unit = meal.unit === 'g' ? 'g' : (meal.unit === 'Whole' && qty ? ' items' : '');
-            const qtyStr = qty ? ` (${qty}${unit})` : '';
-            
-            return (
-              <div key={idx} className="flex flex-col gap-0.5 border-b border-slate-100/50 last:border-0 pb-1.5 last:pb-0 px-1 -mx-1 rounded">
-                <span className="text-[11px] font-black text-slate-700 truncate max-w-full leading-tight">{meal.food_item || 'Diet Apportion'}{qtyStr}</span>
-                <span className="text-[9px] font-bold text-amber-600 tracking-widest flex items-center gap-1"><Clock size={10} /> {timeFormatted}</span>
-              </div>
-            );
-          })}
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-black text-slate-700 truncate max-w-[150px]">{lastMeal.food_item || 'Diet Apportion'}{qtyStr}</span>
+          <span className="text-[10px] font-bold text-amber-600 tracking-widest flex items-center gap-1"><Clock size={10} /> {timeFormatted}</span>
         </div>
       );
     };
 
-    const renderHistoricalFeedData = (log?: DailyLog) => {
-      const meals = log ? extractMeals(log) : [];
-      const lastMeal = meals.length > 0 ? meals[meals.length - 1] : null;
-
-      if (!lastMeal) return <span className="text-[10px] text-slate-300 font-bold uppercase tracking-widest">--</span>;
-      
-      let timeFormatted = '--:--';
-      if (lastMeal.time) {
-        const d = new Date(lastMeal.time);
-        timeFormatted = d.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-      }
-
-      const qty = lastMeal.quantity || lastMeal.quantity_consumed || lastMeal.food_consumed_g;
-      const unit = lastMeal.unit === 'g' ? 'g' : (lastMeal.unit === 'Whole' && qty ? ' items' : '');
-      const qtyStr = qty ? ` (${qty}${unit})` : '';
+    const renderCachedFeedData = (item?: string, timeStr?: string, qty?: string|number) => {
+      if (!item && !timeStr) return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">No Data</span>;
+      const timeFormatted = timeStr ? new Date(timeStr).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' }) : '--:--';
+      const qtyStr = qty ? ` (${qty}g)` : '';
 
       return (
-        <div className="flex flex-col gap-0.5 px-1 -mx-1 pb-1">
-          <span className="text-[11px] font-black text-slate-700 truncate max-w-full">{lastMeal.food_item || 'Unknown Diet'}{qtyStr}</span>
-          <span className="text-[9px] font-bold text-slate-500 tracking-widest flex items-center gap-1"><Clock size={10} /> {timeFormatted}</span>
+        <div className="flex flex-col gap-0.5">
+          <span className="text-xs font-black text-slate-700 truncate max-w-[150px]">{item || 'Unknown Diet'}{qtyStr}</span>
+          <span className="text-[10px] font-bold text-amber-600 tracking-widest flex items-center gap-1"><Clock size={10} /> {timeFormatted}</span>
         </div>
       );
     };
@@ -305,20 +232,22 @@ export function Dashboard() {
           header: 'Weight',
           cell: info => {
             const todayLog = (info.row.original as any).today_log;
+            const baselineWeight = info.getValue(); 
             const unit = (info.row.original as any).weight_unit || 'g';
             
-            if (todayLog?.weight_not_required) return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Exempt</span>;
+            if (!todayLog?.weight_grams && !baselineWeight && info.row.original.record_type === 'GROUP') return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">N/A (Group)</span>;
             
             if (todayLog?.weight_grams) {
-                return <span className="text-sm font-black text-emerald-600 flex items-center gap-1.5"><Scale size={14} className="text-emerald-500 shrink-0" />{formatWeightDisplay(todayLog.weight_grams, unit)}</span>;
+                return <span className="text-sm font-black text-emerald-600 flex items-center gap-1.5"><Scale size={14} className="text-emerald-500 shrink-0" />{formatWeightDisplay(todayLog.weight_grams, unit)} <span className="text-[9px] text-emerald-400 uppercase tracking-widest ml-1 bg-emerald-50 px-1 rounded border border-emerald-100">Logged</span></span>;
             }
-            return <span className="text-sm font-black text-slate-300 flex items-center gap-1.5"><Scale size={14} className="text-slate-200 shrink-0" />--</span>;
+
+            return <span className="text-sm font-black text-slate-700 flex items-center gap-1.5"><Scale size={14} className="text-slate-400 shrink-0" />{baselineWeight ? `${baselineWeight}${unit}` : '--'}</span>;
           },
         }),
         columnHelper.display({ 
           id: 'last_feed', 
           header: 'Last Feed', 
-          cell: info => renderHistoricalFeedData((info.row.original as any).last_feed_log) 
+          cell: info => renderCachedFeedData((info.row.original as any).last_feed_item, (info.row.original as any).last_feed_time, (info.row.original as any).last_feed_amount) 
         }),
         columnHelper.accessor('next_feed_date', {
           id: 'next_feed',
@@ -367,25 +296,27 @@ export function Dashboard() {
         header: 'Today\'s Weight',
         cell: info => {
           const todayLog = (info.row.original as any).today_log;
+          const baselineWeight = info.getValue(); 
           const unit = (info.row.original as any).weight_unit || 'g';
           
-          if (todayLog?.weight_not_required) return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">Exempt</span>;
+          if (!todayLog?.weight_grams && !baselineWeight && info.row.original.record_type === 'GROUP') return <span className="text-[10px] text-slate-400 font-bold uppercase tracking-widest">N/A (Group)</span>;
           
           if (todayLog?.weight_grams) {
-              return <span className="text-sm font-black text-emerald-600 flex items-center gap-1.5"><Scale size={14} className="text-emerald-500 shrink-0" />{formatWeightDisplay(todayLog.weight_grams, unit)}</span>;
+              return <span className="text-sm font-black text-emerald-600 flex items-center gap-1.5"><Scale size={14} className="text-emerald-500 shrink-0" />{formatWeightDisplay(todayLog.weight_grams, unit)} <span className="text-[9px] text-emerald-400 uppercase tracking-widest ml-1 bg-emerald-50 px-1 rounded border border-emerald-100">Logged</span></span>;
           }
-          return <span className="text-sm font-black text-slate-300 flex items-center gap-1.5"><Scale size={14} className="text-slate-200 shrink-0" />--</span>;
+
+          return <span className="text-sm font-black text-slate-700 flex items-center gap-1.5"><Scale size={14} className="text-slate-400 shrink-0" />{baselineWeight ? `${baselineWeight}${unit}` : '--'}</span>;
         },
       }),
       columnHelper.display({ 
         id: 'todays_feed', 
         header: 'Today\'s Feed', 
-        cell: info => renderTodaysFeed((info.row.original as any).today_log) 
+        cell: info => renderFeedData((info.row.original as any).today_log) 
       }),
       columnHelper.display({ 
         id: 'last_feed', 
         header: 'Last Feed', 
-        cell: info => renderHistoricalFeedData((info.row.original as any).last_feed_log) 
+        cell: info => renderCachedFeedData((info.row.original as any).last_feed_item, (info.row.original as any).last_feed_time, (info.row.original as any).last_feed_amount) 
       }),
       locationColumn
     ];
@@ -402,18 +333,17 @@ export function Dashboard() {
 
   const tableGridCols = useMemo(() => {
     return table.getVisibleLeafColumns().map(c => {
-      if (c.id === 'name') return 'minmax(250px, 3fr)';
-      if (c.id === 'latin_name') return 'minmax(140px, 1.5fr)';
-      if (c.id === 'location') return 'minmax(140px, 1.5fr)';
-      if (c.id === 'weight') return 'minmax(120px, 1fr)';
-      if (c.id === 'todays_feed' || c.id === 'last_feed' || c.id === 'next_feed') return 'minmax(180px, 2fr)';
+      if (c.id === 'name') return 'minmax(200px, 2.5fr)';
+      if (c.id === 'species') return 'minmax(120px, 1fr)';
+      if (c.id === 'location') return 'minmax(130px, 1fr)';
+      if (c.id === 'weight') return 'minmax(110px, 1fr)';
+      if (c.id === 'todays_feed' || c.id === 'last_feed' || c.id === 'next_feed') return 'minmax(130px, 1.5fr)';
       return 'minmax(100px, 1fr)';
     }).join(' ');
   }, [table.getVisibleLeafColumns()]);
 
   return (
-    // WIDTH FIX: Replaced max-w with w-full to stretch edge-to-edge on large 4k/1080p monitors
-    <div className="w-full mx-auto space-y-4 md:space-y-6 px-4 md:px-8 pb-20">
+    <div className="max-w-7xl mx-auto space-y-4 md:space-y-6 px-2 md:px-0 pb-20">
       
       <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-white p-4 md:p-6 rounded-2xl border border-slate-200 shadow-sm w-full">
         <div className="w-full xl:w-auto">
@@ -503,7 +433,7 @@ export function Dashboard() {
                       
                       <div className="grid grid-cols-2 gap-3 lg:hidden p-4 bg-white rounded-2xl border border-slate-200 shadow-sm mx-1">
                         {row.getVisibleCells().map(cell => {
-                          if (cell.column.id === 'latin_name' || cell.column.id === 'location') return null;
+                          if (cell.column.id === 'species' || cell.column.id === 'location') return null;
                           
                           const isName = cell.column.id === 'name';
                           return (
