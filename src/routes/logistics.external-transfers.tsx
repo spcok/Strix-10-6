@@ -2,7 +2,7 @@ import React, { useState, useMemo, useRef, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
-import { Truck, Search, Loader2 } from 'lucide-react';
+import { Truck, Search, Loader2, AlertCircle } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { supabase } from '../lib/supabase';
 
@@ -26,10 +26,19 @@ const transfersOptions = queryOptions({
 });
 
 export const Route = createFileRoute('/logistics/external-transfers')({
-  loader: ({ context: { queryClient } }) => {
+  // STRUCTURAL FIX: Explicitly await the promise to prevent UI flickering on route transition
+  loader: async ({ context: { queryClient } }) => {
     // @ts-ignore
-    if (queryClient) queryClient.ensureQueryData(transfersOptions);
+    if (queryClient) await queryClient.ensureQueryData(transfersOptions);
   },
+  // STRUCTURAL FIX: Graceful degradation for offline/failed connections
+  errorComponent: () => (
+    <div className="max-w-7xl mx-auto p-6 mt-6 bg-rose-50 border border-rose-200 rounded-2xl flex flex-col items-center justify-center text-rose-700 text-center shadow-sm">
+      <AlertCircle size={32} className="mb-3 opacity-80" />
+      <h3 className="text-sm font-black uppercase tracking-widest">Connection Error</h3>
+      <p className="text-xs font-bold mt-2">Failed to sync external transfers. Please verify your network connection.</p>
+    </div>
+  ),
   component: ExternalTransfersPage,
 });
 
@@ -40,7 +49,8 @@ export function ExternalTransfersPage() {
   useEffect(() => {
     const channel = supabase.channel('transfers-db-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'external_transfers' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['external_transfers'] });
+        // STRUCTURAL FIX: Restrict cache thrashing to active views only
+        queryClient.invalidateQueries({ queryKey: ['external_transfers'], refetchType: 'active' });
       }).subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
@@ -52,7 +62,9 @@ export function ExternalTransfersPage() {
     const q = searchQuery.toLowerCase();
     return transfers.filter((t: any) => 
       (t.animals?.name || '').toLowerCase().includes(q) || 
-      (t.destination_name || '').toLowerCase().includes(q)
+      (t.animals?.species || '').toLowerCase().includes(q) || 
+      (t.destination_name || '').toLowerCase().includes(q) ||
+      (t.status || '').toLowerCase().includes(q)
     );
   }, [transfers, searchQuery]);
 
@@ -61,6 +73,13 @@ export function ExternalTransfersPage() {
     estimateSize: () => 80,
     overscan: 5,
   });
+
+  // STRUCTURAL FIX: Immediate recalibration of DOM coordinates on tablet rotation
+  useEffect(() => {
+    const handleResize = () => { rowVirtualizer.measure(); };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [rowVirtualizer]);
 
   const virtualItems = rowVirtualizer.getVirtualItems();
   const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
@@ -110,11 +129,14 @@ export function ExternalTransfersPage() {
                     const t = filtered[virtualRow.index];
                     return (
                       <tr key={t.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50">
-                        {/* ENTERPRISE FIX: Safe strict parsing */}
-                        <td className="px-6 py-4 text-[10px] font-black text-slate-400 whitespace-nowrap">{format(parseISO(t.transfer_date), 'dd MMM yyyy')}</td>
+                        {/* STRUCTURAL FIX: Defensive parsing fallback in case of null dates */}
+                        <td className="px-6 py-4 text-[10px] font-black text-slate-400 whitespace-nowrap">
+                          {t.transfer_date ? format(parseISO(t.transfer_date), 'dd MMM yyyy') : '--'}
+                        </td>
+                        {/* STRUCTURAL FIX: Explicitly handle orphaned/missing relational data */}
                         <td className="px-6 py-4">
-                           <span className="text-xs font-black text-slate-900 block">{t.animals?.name}</span>
-                           <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{t.animals?.species}</span>
+                           <span className="text-xs font-black text-slate-900 block">{t.animals?.name || 'Unknown Animal'}</span>
+                           <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest">{t.animals?.species || 'Unknown Taxonomy'}</span>
                         </td>
                         <td className="px-6 py-4 text-xs font-medium text-slate-700">{t.destination_name}</td>
                         <td className="px-6 py-4 text-right">

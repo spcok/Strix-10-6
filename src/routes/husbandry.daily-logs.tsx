@@ -1,383 +1,565 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, queryOptions, useQueryClient } from '@tanstack/react-query';
-import { useWindowVirtualizer } from '@tanstack/react-virtual';
-import { 
-  useReactTable, 
-  getCoreRowModel, 
-  flexRender, 
-  ColumnDef 
-} from '@tanstack/react-table';
-import { Scale, Thermometer, ChevronLeft, ChevronRight, Plus, Loader2, AlertCircle } from 'lucide-react';
+import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
+import { useForm } from '@tanstack/react-form';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter, AlertCircle } from 'lucide-react';
+import { format, addDays } from 'date-fns';
 import { supabase } from '../lib/supabase';
-import { Animal, DailyLog } from '../types';
-import DailyLogFormModal from '../components/animals/DailyLogFormModal';
-
-export const generateOfflineUUID = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-};
-
-const getLocalDateString = () => {
-  const d = new Date();
-  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
-};
-
-export const formatWeightDisplay = (grams: number | null | undefined, unit: string) => {
-  if (!grams) return null;
-  if (unit === 'kg') return `${(grams / 1000).toFixed(2)}kg`;
-  if (unit === 'lb') {
-    const totalOunces = grams / 28.3495;
-    let lbs = Math.floor(totalOunces / 16);
-    let oz = Math.floor(totalOunces - (lbs * 16));
-    let eighths = Math.round((totalOunces - (lbs * 16) - oz) * 8);
-    if (eighths >= 8) { oz += 1; eighths = 0; }
-    if (oz >= 16) { lbs += 1; oz = 0; }
-    const eighthsStr = eighths > 0 ? ` ${eighths}/8` : '';
-    return `${lbs}lb ${oz}${eighthsStr}oz`;
-  }
-  if (unit === 'oz') {
-    const totalOunces = grams / 28.3495;
-    let oz = Math.floor(totalOunces);
-    let eighths = Math.round((totalOunces - oz) * 8);
-    if (eighths >= 8) { oz += 1; eighths = 0; }
-    const eighthsStr = eighths > 0 ? ` ${eighths}/8` : '';
-    return `${oz}${eighthsStr}oz`;
-  }
-  return `${Math.round(grams)}g`;
-};
+import { useAuth } from '../lib/auth';
+import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
+import { feedingService } from '../services/feedingService';
 
 const getAnimalsOptions = () => queryOptions({
   queryKey: ['animals', 'dashboard'],
   queryFn: async () => {
-    const { data, error } = await supabase.from('animals').select('*').order('name');
+    const { data, error } = await supabase.from('animals').select('*').eq('archived', false);
     if (error) throw error;
     return data as Animal[];
   },
   staleTime: 1000 * 60 * 5,
-  gcTime: 1000 * 60 * 60 * 24 * 14,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
   networkMode: 'offlineFirst',
   meta: { persist: true }
 });
 
-const getDailyLogsOptions = (date: string) => queryOptions({
-  queryKey: ['daily_logs', 'date-view', date],
+const getSchedulesOptions = () => queryOptions({
+  queryKey: ['feeding_schedules'],
   queryFn: async () => {
-    const startOfDay = new Date(`${date}T00:00:00`);
-    const endOfDay = new Date(`${date}T23:59:59.999`);
+    const maxDateStr = format(addDays(new Date(), 30), 'yyyy-MM-dd');
     const { data, error } = await supabase
-      .from('daily_logs')
+      .from('feeding_schedules')
       .select('*')
       .eq('is_deleted', false)
-      .gte('log_date', startOfDay.toISOString())
-      .lte('log_date', endOfDay.toISOString());
+      .lte('scheduled_date', maxDateStr);
     if (error) throw error;
-    return data as DailyLog[];
+    return data as FeedingScheduleType[];
   },
   staleTime: 1000 * 60 * 5,
-  gcTime: 1000 * 60 * 60 * 24 * 14,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
   networkMode: 'offlineFirst',
   meta: { persist: true }
 });
 
-export const Route = createFileRoute('/husbandry/daily-logs')({
-  loader: async ({ context: { queryClient } }) => {
-    const today = getLocalDateString();
-    if (queryClient) {
-      await queryClient.ensureQueryData(getAnimalsOptions());
-      await queryClient.ensureQueryData(getDailyLogsOptions(today));
-    }
+const getFoodOptions = () => queryOptions({
+  queryKey: ['operational_lists', 'FOOD_TYPE'],
+  queryFn: async () => {
+    const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
+    if (error) throw error;
+    return data as OperationalList[];
   },
-  component: DailyLogsPage,
+  staleTime: 1000 * 60 * 5,
+  gcTime: 1000 * 60 * 60 * 24 * 15,
+  networkMode: 'offlineFirst',
+  meta: { persist: true }
 });
 
-const SECTION_BAR = [
-  { id: 'ALL', label: 'All' },
-  { id: 'OWL', label: 'Owls' },
-  { id: 'RAPTOR', label: 'Raptors' },
-  { id: 'MAMMAL', label: 'Mammal' },
-  { id: 'EXOTIC', label: 'Exotic' }
-] as const;
+export const Route = createFileRoute('/husbandry/feeding')({
+  loader: async ({ context: { queryClient } }) => {
+    if (queryClient) {
+      await Promise.all([
+        queryClient.ensureQueryData(getAnimalsOptions()),
+        queryClient.ensureQueryData(getSchedulesOptions()),
+        queryClient.ensureQueryData(getFoodOptions())
+      ]);
+    }
+  },
+  component: FeedingSchedulePage,
+});
 
-type WorksheetRecord = { animal: Animal; log: DailyLog | undefined };
+const getLocalDateString = () => format(new Date(), 'yyyy-MM-dd');
 
-const DYNAMIC_GRID_COLS = "lg:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(280px,2.5fr)_minmax(250px,2fr)]";
-
-export function DailyLogsPage() {
+export function FeedingSchedulePage() {
   const queryClient = useQueryClient();
-  const [selectedDate, setSelectedDate] = useState<string>(getLocalDateString());
-  const [activeSection, setActiveSection] = useState<string>('ALL');
+  const { user } = useAuth();
+  const scrollParentRef = useRef<HTMLDivElement>(null);
   
-  const [logModalState, setLogModalState] = useState<{
-    isOpen: boolean;
-    animal: Animal | null;
-    mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION';
-    initialData: DailyLog | undefined;
-  }>({ isOpen: false, animal: null, mode: 'OBSERVATION', initialData: undefined });
+  const [activeTab, setActiveTab] = useState<string>('EXOTIC');
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const categories = ['OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC'];
 
-  const parentRef = useRef<HTMLDivElement>(null);
+  const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
+  const [viewLayout, setViewLayout] = useState<'individual' | 'grouped'>('individual');
 
   useEffect(() => {
     const channel = supabase
-      .channel('schema-db-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_logs' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
-      }).subscribe();
-    return () => { supabase.removeChannel(channel); };
+      .channel('feeding-db-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'feeding_schedules' },
+        (payload) => {
+          queryClient.invalidateQueries({ queryKey: ['feeding_schedules'], refetchType: 'active' });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, [queryClient]);
 
   const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
-  const { data: todaysLogs = [], isLoading: loadingLogs, error: logsError } = useQuery(getDailyLogsOptions(selectedDate));
+  const { data: schedules = [], isLoading: loadingSchedules } = useQuery(getSchedulesOptions());
+  const { data: foodOptions = [], isLoading: loadingFood } = useQuery(getFoodOptions());
 
-  const filteredWorksheetRecords = useMemo<WorksheetRecord[]>(() => {
-    const cleanAnimals = animals.filter(a => {
-      if (a.status === 'ARCHIVED') return false;
-      if (activeSection === 'ALL') return true;
-      return a.category === activeSection;
-    });
-    const logMap = new Map<string, DailyLog>();
-    todaysLogs.forEach(log => { logMap.set(log.animal_id, log); });
-    return cleanAnimals.map(animal => ({ animal, log: logMap.get(animal.id) }));
-  }, [animals, todaysLogs, activeSection]);
-
-  const shiftDate = (days: number) => {
-    const current = new Date(selectedDate);
-    current.setDate(current.getDate() + days);
-    setSelectedDate(current.toISOString().split('T')[0]);
-  };
-
-  const triggerLogForm = (animal: Animal, mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION', existingLog?: DailyLog) => {
-    setLogModalState({ isOpen: true, animal, mode, initialData: existingLog });
-  };
-
-  const columns = useMemo<ColumnDef<WorksheetRecord>[]>(() => [
-    {
-      id: 'entity',
-      header: 'Entity Matrix',
-      cell: ({ row }) => (
-        <div className="flex flex-col pt-2">
-          <span className="font-black text-slate-900 text-lg lg:text-sm leading-tight">{row.original.animal.name}</span>
-          <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">{row.original.animal.species}</span>
-        </div>
-      )
+  const deleteSingleMutation = useMutation({
+    mutationFn: async (scheduleId: string) => {
+      if (!user?.id) throw new Error('Unauthorized');
+      await feedingService.deleteSchedule(scheduleId, user.id);
     },
-    {
-      id: 'weight',
-      header: 'Target Bio-Weight',
-      cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'WEIGHT', log)} className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'}`}>
-          {log?.weight_not_required ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : log?.weight_grams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(log.weight_grams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
-        </button>
-      )
-    },
-    {
-      id: 'temperature',
-      header: 'Thermal Parameters',
-      cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)} className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center'}`}>
-          {log?.temperature_c ? <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight text-center">{log.temperature_c}°C</div> : <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>}
-        </button>
-      )
-    },
-    {
-      id: 'feeding',
-      header: 'Multi-Feeding Event Pipeline',
-      cell: ({ row: { original: { animal, log } } }) => {
-        const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
-        const meals = feedParsed?.meals || [];
-        return (
-          <div className="flex flex-col gap-2 w-full">
-            {meals.map((meal: any, idx: number) => {
-              const qty = meal.quantity || meal.quantity_consumed || meal.food_consumed_g || meal.quantity_offered || meal.food_offered_g;
-              const unit = meal.unit === 'g' ? 'g' : (meal.unit === 'Whole' && qty ? ' items' : '');
-              const qtyStr = qty ? `${qty}${unit}` : '--';
-
-              return (
-                <div key={idx} onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl flex flex-col gap-1 lg:gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/50">
-                  <div className="flex justify-between font-black text-slate-800 tracking-tight text-[11px]"><span>{meal.food_item || 'Diet Apportion'}</span><span className="text-amber-700 font-bold">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>
-                  <div className="text-slate-500 font-bold tracking-tight text-[10px]">Qty: <span className="text-emerald-600 font-black">{qtyStr}</span></div>
-                </div>
-              );
-            })}
-            <button type="button" onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 lg:py-1.5 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-amber-700 hover:border-amber-200 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all w-full lg:w-max shadow-sm"><Plus size={12} className="lg:w-[10px] lg:h-[10px]" /> Add Feed</button>
-          </div>
-        );
-      }
-    },
-    {
-      id: 'observations',
-      header: 'Daily Descriptive Observations',
-      cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'OBSERVATION', log)} className="w-full text-left hover:bg-slate-100/50 p-3 lg:p-2 rounded-xl border border-slate-100 lg:border-transparent transition-colors min-h-[60px] lg:min-h-[44px] flex items-start">
-          <span className="text-xs lg:text-[11px] leading-relaxed block whitespace-pre-wrap">{log?.notes || <span className="text-slate-400 italic">No notes entered for this date...</span>}</span>
-        </button>
-      )
-    }
-  ], []);
-
-  const table = useReactTable({
-    data: filteredWorksheetRecords,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
   });
 
-  const { rows } = table.getRowModel();
+  const deleteGroupMutation = useMutation({
+    mutationFn: async (scheduleIds: string[]) => {
+      if (!user?.id) throw new Error('Unauthorized');
+      await Promise.all(scheduleIds.map(id => feedingService.deleteSchedule(id, user.id)));
+    },
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
+  });
 
-  const rowVirtualizer = useWindowVirtualizer({
-    count: rows.length,
-    estimateSize: () => (typeof window !== 'undefined' && window.innerWidth >= 1024) ? 80 : 190,
+  // --- STRICT NETWORK GUARDS ---
+  const handleSingleDelete = (id: string) => {
+    if (!navigator.onLine) {
+      setErrorMsg('Network connection required to delete future schedules.');
+      return;
+    }
+    setErrorMsg(null);
+    deleteSingleMutation.mutate(id);
+  };
+
+  const handleGroupDelete = (ids: string[]) => {
+    if (!navigator.onLine) {
+      setErrorMsg('Network connection required to delete future schedules.');
+      return;
+    }
+    setErrorMsg(null);
+    deleteGroupMutation.mutate(ids);
+  };
+
+  const filteredAnimals = useMemo(() => 
+    animals.filter(a => (a.category || '').toUpperCase() === activeTab),
+  [animals, activeTab]);
+
+  const upcomingSchedules = useMemo(() => 
+    [...schedules].sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date)),
+  [schedules]);
+
+  const displayedSchedules = useMemo(() => {
+      let filtered = upcomingSchedules;
+      if (filterAnimalId !== 'ALL') {
+          filtered = filtered.filter(s => s.animal_id === filterAnimalId);
+      }
+      return filtered;
+  }, [upcomingSchedules, filterAnimalId]);
+
+  const groupedSchedules = useMemo(() => {
+      const groups = new Map();
+      displayedSchedules.forEach(schedule => {
+          const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
+          const supplementKey = schedule.supplements || 'none';
+          const key = `${schedule.animal_id}_${schedule.food_type}_${schedule.quantity}_${supplementKey}_${isNotRequired}`;
+          
+          if (!groups.has(key)) {
+              groups.set(key, { 
+                  ...schedule, count: 1, end_date: schedule.scheduled_date, start_date: schedule.scheduled_date, child_ids: [schedule.id],
+                  feed_not_required: isNotRequired
+              });
+          } else {
+              const existing = groups.get(key);
+              existing.count += 1;
+              if (schedule.scheduled_date > existing.end_date) existing.end_date = schedule.scheduled_date;
+              if (schedule.scheduled_date < existing.start_date) existing.start_date = schedule.scheduled_date;
+              existing.child_ids.push(schedule.id);
+          }
+      });
+      return Array.from(groups.values());
+  }, [displayedSchedules]);
+
+  const form = useForm({
+    defaultValues: {
+      animal_id: '',
+      food_type: '',
+      quantity: 1,
+      calci_dust: false,
+      feed_not_required: false,
+      schedule_mode: 'single' as 'single' | 'interval',
+      target_date: getLocalDateString(),
+      interval_days: 3,
+      occurrences: 5
+    },
+    onSubmit: async ({ value }) => {
+      // --- STRICT NETWORK GUARD ---
+      if (!navigator.onLine) {
+        setErrorMsg('Network connection required to generate future schedules.');
+        return;
+      }
+      
+      setErrorMsg(null);
+      try {
+        let datesToSchedule: string[] = [];
+
+        if (value.schedule_mode === 'single') {
+            datesToSchedule.push(value.target_date);
+        } else {
+            const [y, m, d] = value.target_date.split('-').map(Number);
+            const startDate = new Date(y, m - 1, d);
+            const safeOccurrences = Math.min(value.occurrences, 60);
+
+            for (let i = 0; i < safeOccurrences; i++) {
+                const nextDate = new Date(startDate);
+                nextDate.setDate(startDate.getDate() + (i * value.interval_days));
+                
+                const ny = nextDate.getFullYear();
+                const nm = String(nextDate.getMonth() + 1).padStart(2, '0');
+                const nd = String(nextDate.getDate()).padStart(2, '0');
+                datesToSchedule.push(`${ny}-${nm}-${nd}`);
+            }
+        }
+
+        const newSchedules: Partial<FeedingScheduleType>[] = datesToSchedule.map(date => ({
+            animal_id: value.animal_id,
+            scheduled_date: date,
+            food_type: value.feed_not_required ? 'NOT REQUIRED' : value.food_type,
+            quantity: value.feed_not_required ? 0 : value.quantity,
+            quantity_unit: 'item', 
+            status: 'PENDING',
+            supplements: value.calci_dust ? 'Calci-Dust' : null,
+            notes: value.feed_not_required ? 'FAST DAY / NOT REQUIRED' : null,
+            presentation_method: null,
+            is_deleted: false,
+        }));
+
+        if (!user?.id) throw new Error('User context unavailable');
+        
+        await feedingService.bulkCreateSchedules(newSchedules as any, user.id);
+        queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+        form.reset();
+
+      } catch (err: any) {
+        console.error('Failed to generate schedules:', err);
+        setErrorMsg(err.message || 'Failed to generate feeding schedules. Please check connection.');
+      }
+    }
+  });
+
+  const inputClass = "w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all shadow-sm";
+
+  const activeList = viewLayout === 'individual' ? displayedSchedules : groupedSchedules;
+
+  const rowVirtualizer = useVirtualizer({
+    count: activeList.length,
+    getScrollElement: () => scrollParentRef.current,
+    estimateSize: () => 64,
     overscan: 5,
   });
 
+  useEffect(() => {
+    const handleResize = () => { rowVirtualizer.measure(); };
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [rowVirtualizer]);
+
+  const virtualItems = rowVirtualizer.getVirtualItems();
+  const paddingTop = virtualItems.length > 0 ? virtualItems[0].start : 0;
+  const paddingBottom = virtualItems.length > 0 ? rowVirtualizer.getTotalSize() - virtualItems[virtualItems.length - 1].end : 0;
+
   return (
-    <div className="max-w-[1600px] mx-auto w-full space-y-4 lg:space-y-6 px-4 md:px-8 pb-20">
+    <div className="max-w-7xl mx-auto space-y-6 pb-32">
       
-      <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-white p-4 lg:p-6 rounded-2xl border border-slate-200 shadow-sm w-full">
-        <div className="w-full xl:w-auto">
-          <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight">Husbandry Entry Sheet</h1>
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Day-To-Day Logs Matrix</p>
-        </div>
-        
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center gap-3 lg:gap-4 w-full xl:w-auto">
-          <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner overflow-x-auto w-full lg:w-auto scrollbar-hide">
-            {SECTION_BAR.map(btn => (
-              <button
-                key={btn.id} type="button" onClick={() => setActiveSection(btn.id)}
-                className={`px-4 py-2 lg:py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest whitespace-nowrap transition-all flex-1 lg:flex-none ${
-                  activeSection === btn.id ? 'bg-white text-slate-900 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
-                }`}
-              >
-                {btn.label}
-              </button>
-            ))}
-          </div>
-
-          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner w-full lg:w-auto justify-between lg:justify-start">
-            <button onClick={() => shiftDate(-1)} className="p-3 lg:p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg shadow-sm"><ChevronLeft size={16} className="lg:w-4 lg:h-4" /></button>
-            <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="bg-transparent border-none text-xs font-black uppercase tracking-widest text-slate-700 outline-none text-center px-2 w-full lg:w-32" />
-            <button onClick={() => shiftDate(1)} className="p-3 lg:p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg shadow-sm"><ChevronRight size={16} className="lg:w-4 lg:h-4" /></button>
-          </div>
+      <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+        <div>
+          <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
+            Feeding Schedule
+          </h1>
+          <p className="text-[10px] font-black text-slate-500 mt-1 uppercase tracking-widest">Plan & Forecast Animal Diets</p>
         </div>
       </div>
 
-      <div className="bg-transparent lg:bg-white lg:border border-slate-200 rounded-none lg:rounded-2xl lg:shadow-sm overflow-hidden flex flex-col w-full">
-        {logsError ? (
-          <div className="p-10 text-center text-rose-600 bg-rose-50 rounded-2xl font-bold flex flex-col items-center gap-3">
-            <AlertCircle size={24} /> Database link exception. Verify network availability.
-          </div>
-        ) : (loadingAnimals || loadingLogs) && filteredWorksheetRecords.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center gap-4">
-            <Loader2 size={24} className="text-emerald-500 animate-spin" />
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Syncing active workbook metrics...</span>
-          </div>
-        ) : (
-          <div className="w-full lg:overflow-x-auto custom-scrollbar">
-            <div className="w-full lg:min-w-full">
-              
-              <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 px-6 py-4 bg-slate-50 border-b border-slate-200 text-slate-500 font-black text-[10px] uppercase tracking-widest`}>
-                {table.getHeaderGroups().map(headerGroup => (
-                  <React.Fragment key={headerGroup.id}>
-                    {headerGroup.headers.map(header => (
-                      <div key={header.id}>
-                        {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
-                      </div>
-                    ))}
-                  </React.Fragment>
-                ))}
-              </div>
-
-              <div ref={parentRef} style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const row = rows[virtualRow.index];
-                  const { animal, log } = row.original;
-                  
-                  const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
-                  const meals = feedParsed?.meals || [];
-
-                  return (
-                    <div
-                      key={row.id}
-                      data-index={virtualRow.index}
-                      ref={rowVirtualizer.measureElement}
-                      className="absolute top-0 left-0 w-full py-2 lg:py-0"
-                      style={{ transform: `translateY(${virtualRow.start}px)` }}
-                    >
-                      <div className="flex flex-col gap-3 lg:hidden p-4 bg-white rounded-2xl border border-slate-200 shadow-sm mx-1">
-                        
-                        <div className="flex flex-col">
-                          <span className="font-black text-slate-900 text-lg leading-tight">{animal.name}</span>
-                          <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">{animal.species}</span>
-                        </div>
-
-                        {meals.length > 0 && (
-                          <div className="flex flex-col gap-2 w-full">
-                            {meals.map((meal: any, idx: number) => {
-                              const qty = meal.quantity || meal.quantity_consumed || meal.food_consumed_g || meal.quantity_offered || meal.food_offered_g;
-                              const unit = meal.unit === 'g' ? 'g' : (meal.unit === 'Whole' && qty ? ' items' : '');
-                              const qtyStr = qty ? `${qty}${unit}` : '--';
-
-                              return (
-                                <div key={idx} onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="bg-amber-50/60 border border-amber-200/70 p-3 rounded-xl flex flex-col gap-1 shadow-sm cursor-pointer">
-                                  <div className="flex justify-between font-black text-slate-800 tracking-tight text-[11px]"><span>{meal.food_item || 'Diet Apportion'}</span><span className="text-amber-700 font-bold">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>
-                                  <div className="text-slate-500 font-bold tracking-tight text-[10px]">Qty: <span className="text-emerald-600 font-black">{qtyStr}</span></div>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-
-                        <div className="grid grid-cols-3 gap-2 w-full">
-                          <button type="button" onClick={() => triggerLogForm(animal, 'WEIGHT', log)} className={`min-h-[48px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100'}`}>
-                            {log?.weight_not_required ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : log?.weight_grams ? <span className="text-xs font-black tracking-tight">{formatWeightDisplay(log.weight_grams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
-                          </button>
-
-                          <button type="button" onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)} className={`min-h-[48px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100'}`}>
-                            {log?.temperature_c ? <span className="text-xs font-black tracking-tight">{log.temperature_c}°C</span> : <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>}
-                          </button>
-
-                          <button type="button" onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="min-h-[48px] p-2 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 rounded-xl flex flex-col justify-center items-center transition-all shadow-sm">
-                            <Plus size={14} className="opacity-40 mb-1" />
-                            <span className="text-[9px] font-black uppercase tracking-widest">Add Feed</span>
-                          </button>
-                        </div>
-
-                        <button type="button" onClick={() => triggerLogForm(animal, 'OBSERVATION', log)} className="w-full text-left p-3 bg-slate-50/50 rounded-xl border border-slate-100 min-h-[60px] flex items-start">
-                          <span className="text-xs leading-relaxed block whitespace-pre-wrap">{log?.notes || <span className="text-slate-400 italic">No notes entered for this date...</span>}</span>
-                        </button>
-
-                      </div>
-
-                      <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 px-6 py-4 bg-transparent hover:bg-slate-50/40 border-b border-slate-100 transition-colors items-start`}>
-                        {row.getVisibleCells().map(cell => (
-                          <div key={cell.id}>
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                          </div>
-                        ))}
-                      </div>
-
-                    </div>
-                  );
-                })}
-              </div>
-
-            </div>
-          </div>
-        )}
-      </div>
-
-      {logModalState.isOpen && logModalState.animal && (
-        <DailyLogFormModal
-          isOpen={logModalState.isOpen} 
-          animal={logModalState.animal} 
-          mode={logModalState.mode} 
-          initialLogData={logModalState.initialData}
-          onClose={() => setLogModalState({ isOpen: false, animal: null, mode: 'OBSERVATION', initialData: undefined })}
-        />
+      {/* UX FIX: Page-Level Alert Banner replacing the buried inline error */}
+      {errorMsg && (
+        <div className="p-4 bg-rose-50 border border-rose-200 rounded-2xl flex items-center gap-3 text-rose-700 text-sm font-black uppercase tracking-widest shadow-sm">
+          <AlertCircle size={20} className="shrink-0" />
+          <div>{errorMsg}</div>
+        </div>
       )}
+
+      <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 items-start">
+        
+        {/* LEFT: FORM */}
+        <div className="xl:col-span-1 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm h-fit">
+           <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest mb-6 flex items-center gap-2 border-b border-slate-100 pb-4">
+              <Plus size={16} className="text-emerald-600"/> Generate Schedules
+           </h4>
+
+           <div className="flex overflow-x-auto scrollbar-hide bg-slate-50 p-1.5 rounded-xl gap-1 mb-5 border border-slate-200">
+              {categories.map(cat => (
+                  <button 
+                      key={cat} onClick={() => { setActiveTab(cat); form.setFieldValue('animal_id', ''); }}
+                      className={`flex-1 min-w-[70px] py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === cat ? 'bg-white text-emerald-700 border border-emerald-200 shadow-sm' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'}`}
+                  >
+                      {cat}
+                  </button>
+              ))}
+           </div>
+
+           <form onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-4">
+              <form.Field name="animal_id" children={(field) => (
+                  <div>
+                      <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Animal *</label>
+                      <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingAnimals} required>
+                          <option value="">{loadingAnimals ? 'Loading animals...' : 'Select Animal...'}</option>
+                          {filteredAnimals.map(a => <option key={a.id} value={a.id!}>{a.name} ({a.species})</option>)}
+                      </select>
+                  </div>
+              )}/>
+
+              <form.Field name="feed_not_required" children={(field) => (
+                  <div className="flex items-center gap-3 bg-rose-50 p-3 rounded-xl border border-rose-200">
+                      <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-rose-600 bg-white rounded border-rose-300 focus:ring-rose-500/50" />
+                      <span className="text-xs font-bold text-rose-700 uppercase tracking-widest">Fast Day / Not Required</span>
+                  </div>
+              )}/>
+
+              <form.Subscribe selector={(state) => state.values.feed_not_required} children={(notRequired) => (
+                !notRequired ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-4">
+                        <form.Field name="food_type" children={(field) => (
+                            <div>
+                                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Food Type *</label>
+                                {foodOptions.length > 0 ? (
+                                    <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingFood} required>
+                                        <option value="">{loadingFood ? 'Loading...' : 'Select...'}</option>
+                                        {foodOptions.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                                    </select>
+                                ) : (
+                                    <input value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} placeholder="E.g. Mice" required />
+                                )}
+                            </div>
+                        )}/>
+                        <form.Field name="quantity" children={(field) => (
+                            <div>
+                                <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Quantity *</label>
+                                <input type="number" step="0.1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseFloat(e.target.value))} className={inputClass} required />
+                            </div>
+                        )}/>
+                    </div>
+
+                    <form.Field name="calci_dust" children={(field) => (
+                        <div className="flex items-center gap-3 bg-slate-50 p-3 rounded-xl border border-slate-200">
+                            <input type="checkbox" checked={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.checked)} className="w-4 h-4 text-emerald-600 bg-white rounded border-slate-300 focus:ring-emerald-500/50" />
+                            <span className="text-xs font-bold text-slate-700 uppercase tracking-widest">Include Calci-Dust</span>
+                        </div>
+                    )}/>
+                  </>
+                ) : null
+              )}/>
+
+              <div className="pt-4 border-t border-slate-100">
+                  <form.Field name="schedule_mode" children={(field) => (
+                      <div className="flex bg-slate-50 p-1.5 rounded-xl border border-slate-200 mb-4">
+                          <button type="button" onClick={() => field.handleChange('single')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${field.state.value === 'single' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}>Single Feed</button>
+                          <button type="button" onClick={() => field.handleChange('interval')} className={`flex-1 py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all flex items-center justify-center gap-1.5 ${field.state.value === 'interval' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}><RefreshCw size={12}/> Auto-Interval</button>
+                      </div>
+                  )}/>
+
+                  <form.Subscribe selector={(state) => state.values.schedule_mode} children={(mode) => (
+                      <div className="space-y-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                          <form.Field name="target_date" children={(field) => (
+                              <div>
+                                  <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">{mode === 'interval' ? 'Start Date' : 'Target Date'} *</label>
+                                  <input type="date" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} required/>
+                              </div>
+                          )}/>
+                          
+                          {mode === 'interval' && (
+                              <div className="grid grid-cols-2 gap-4">
+                                  <form.Field name="interval_days" children={(field) => (
+                                      <div>
+                                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Repeat Every (Days)</label>
+                                          <input type="number" min="1" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                                      </div>
+                                  )}/>
+                                  <form.Field name="occurrences" children={(field) => (
+                                      <div>
+                                          <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Occurrences</label>
+                                          <input type="number" min="1" max="60" value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(parseInt(e.target.value))} className={inputClass} required/>
+                                      </div>
+                                  )}/>
+                              </div>
+                          )}
+                      </div>
+                  )}/>
+              </div>
+
+              <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]} children={([canSubmit, isSubmitting]) => (
+                  <button type="submit" disabled={!canSubmit || isSubmitting as boolean || loadingSchedules} className="w-full mt-4 bg-emerald-600 text-white py-3.5 rounded-xl text-xs font-black uppercase tracking-widest hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all shadow-md flex items-center justify-center gap-2">
+                      {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : <CalendarClock size={16} />}
+                      {isSubmitting ? 'SCHEDULING...' : 'CONFIRM SCHEDULE'}
+                  </button>
+              )}/>
+           </form>
+        </div>
+
+        {/* RIGHT: TABLE */}
+        <div className="xl:col-span-2 bg-white rounded-2xl border border-slate-200 shadow-sm flex flex-col h-[calc(100vh-10rem)] min-h-[600px] overflow-hidden">
+           
+           <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-slate-50/50">
+               <div>
+                  <h4 className="text-xs font-black text-slate-900 uppercase tracking-widest flex items-center gap-2">
+                      <Utensils size={16} className="text-emerald-600"/> Scheduled Feeds
+                  </h4>
+                  <p className="text-[10px] text-slate-500 mt-1 uppercase font-bold tracking-widest">{displayedSchedules.length} Pending Feeds</p>
+               </div>
+
+               <div className="flex flex-wrap items-center gap-3">
+                   <div className="flex items-center gap-2 bg-white p-1.5 rounded-xl border border-slate-200 shadow-sm">
+                       <Filter size={14} className="text-slate-400 ml-2" />
+                       <select 
+                          value={filterAnimalId} 
+                          onChange={(e) => setFilterAnimalId(e.target.value)}
+                          className="bg-transparent text-[10px] font-black text-slate-700 uppercase tracking-widest border-none focus:ring-0 cursor-pointer outline-none py-1 pr-2 w-32 truncate"
+                       >
+                           <option value="ALL">All Animals</option>
+                           {animals.map(a => <option key={a.id} value={a.id!}>{a.name}</option>)}
+                       </select>
+                   </div>
+
+                   <div className="bg-slate-100 p-1.5 rounded-xl flex border border-slate-200">
+                       <button onClick={() => setViewLayout('individual')} className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewLayout === 'individual' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}>Individual</button>
+                       <button onClick={() => setViewLayout('grouped')} className={`px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all ${viewLayout === 'grouped' ? 'bg-white text-slate-900 shadow-sm border border-slate-200' : 'text-slate-500 hover:text-slate-900'}`}>Grouped</button>
+                   </div>
+               </div>
+           </div>
+
+           <div ref={scrollParentRef} className="flex-1 overflow-y-auto relative custom-scrollbar">
+              {loadingSchedules && (
+                <div className="absolute inset-0 z-20 bg-white/50 backdrop-blur-sm flex items-center justify-center">
+                    <div className="flex flex-col items-center gap-3">
+                        <Loader2 className="animate-spin text-emerald-600 w-8 h-8" />
+                        <span className="text-xs font-black text-slate-500 uppercase tracking-widest">Syncing Data...</span>
+                    </div>
+                </div>
+              )}
+              <table className="w-full text-left min-w-[600px]">
+                  <thead className="bg-slate-50 sticky top-0 z-10 border-b border-slate-200">
+                      <tr>
+                          <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/4">Date</th>
+                          <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/3">Animal</th>
+                          <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest w-1/3">Diet specifics</th>
+                          <th className="px-6 py-4 text-[10px] font-black text-slate-500 uppercase tracking-widest text-right">Action</th>
+                      </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                      {!loadingSchedules && activeList.length === 0 ? (
+                           <tr><td colSpan={4} className="px-6 py-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No upcoming schedules found.</td></tr>
+                      ) : (
+                          <>
+                              {paddingTop > 0 && <tr><td colSpan={4} style={{ height: `${paddingTop}px` }} /></tr>}
+                              {virtualItems.map((virtualRow) => {
+                                  const item = activeList[virtualRow.index];
+                                  
+                                  if (viewLayout === 'individual') {
+                                      const schedule = item as FeedingScheduleType;
+                                      const animal = animals.find(a => a.id === schedule.animal_id);
+                                      const [y, m, d] = schedule.scheduled_date.split('-').map(Number);
+                                      const dateObj = new Date(y, m - 1, d);
+                                      const isToday = schedule.scheduled_date === getLocalDateString();
+                                      const isNotRequired = schedule.notes === 'FAST DAY / NOT REQUIRED';
+                                      
+                                      const isDeleting = deleteSingleMutation.isPending && deleteSingleMutation.variables === schedule.id;
+
+                                      return (
+                                          <tr key={schedule.id} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
+                                              <td className="px-6 py-4">
+                                                  <div className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-md border text-[10px] font-black uppercase tracking-widest ${isToday ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-slate-100 border-slate-200 text-slate-600'}`}>
+                                                      <CalIcon size={12}/> {format(dateObj, 'd MMM')}
+                                                  </div>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  {isNotRequired ? (
+                                                    <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
+                                                  ) : (
+                                                    <>
+                                                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{schedule.quantity}x {schedule.food_type}</p>
+                                                      {schedule.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {schedule.supplements}</span>}
+                                                    </>
+                                                  )}
+                                              </td>
+                                              <td className="px-6 py-4 text-right">
+                                                  <button 
+                                                    onClick={() => handleSingleDelete(schedule.id!)}
+                                                    disabled={isDeleting}
+                                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50"
+                                                  >
+                                                      {isDeleting ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                  </button>
+                                              </td>
+                                          </tr>
+                                      );
+                                  } else {
+                                      const group = item as any;
+                                      const animal = animals.find(a => a.id === group.animal_id);
+                                      const [sy, sm, sd] = group.start_date.split('-').map(Number);
+                                      const startDateObj = new Date(sy, sm - 1, sd);
+                                      const [ey, em, ed] = group.end_date.split('-').map(Number);
+                                      const endDateObj = new Date(ey, em - 1, ed);
+
+                                      const isDeletingGroup = deleteGroupMutation.isPending && deleteGroupMutation.variables === group.child_ids;
+
+                                      return (
+                                          <tr key={virtualRow.index} ref={rowVirtualizer.measureElement} data-index={virtualRow.index} className="hover:bg-slate-50 transition-colors group">
+                                              <td className="px-6 py-4">
+                                                  <div className="flex flex-col gap-1">
+                                                      <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
+                                                          Start: {format(startDateObj, 'd MMM')}
+                                                      </div>
+                                                      {group.count > 1 && (
+                                                          <div className="inline-flex items-center gap-2 px-2 py-1 rounded-md border bg-slate-100 border-slate-200 text-slate-600 text-[9px] font-black uppercase tracking-widest w-fit">
+                                                              End: {format(endDateObj, 'd MMM')}
+                                                          </div>
+                                                      )}
+                                                  </div>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  <p className="text-xs font-bold text-slate-900 uppercase tracking-tight">{animal?.name || 'Unknown'}</p>
+                                              </td>
+                                              <td className="px-6 py-4">
+                                                  {group.feed_not_required ? (
+                                                    <p className="text-xs font-bold text-rose-600 uppercase tracking-widest">NOT REQUIRED</p>
+                                                  ) : (
+                                                    <>
+                                                      <p className="text-xs font-bold text-emerald-600 uppercase tracking-widest">{group.quantity}x {group.food_type} <span className="text-slate-400">({group.count} feeds)</span></p>
+                                                      {group.supplements && <span className="text-[9px] text-slate-500 font-bold uppercase tracking-widest mt-0.5 block">+ {group.supplements}</span>}
+                                                    </>
+                                                  )}
+                                              </td>
+                                              <td className="px-6 py-4 text-right">
+                                                  <button 
+                                                    onClick={() => handleGroupDelete(group.child_ids)}
+                                                    disabled={isDeletingGroup}
+                                                    className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50" 
+                                                    title="Delete entire group"
+                                                  >
+                                                      {isDeletingGroup ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                                                  </button>
+                                              </td>
+                                          </tr>
+                                      );
+                                  }
+                              })}
+                              {paddingBottom > 0 && <tr><td colSpan={4} style={{ height: `${paddingBottom}px` }} /></tr>}
+                          </>
+                      )}
+                  </tbody>
+              </table>
+           </div>
+        </div>
+      </div>
     </div>
   );
 }
