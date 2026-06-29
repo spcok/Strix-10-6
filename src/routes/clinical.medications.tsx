@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { createFileRoute } from '@tanstack/react-router';
-import { useQueryClient } from '@tanstack/react-query';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { Pill, Activity, WifiOff, FileText, AlertCircle, Loader2 } from 'lucide-react';
@@ -12,21 +12,32 @@ import MedicationHistory from '../components/medical/MedicationHistory';
 import { marExportService } from '../services/marExportService';
 import { Prescription } from '../types';
 
+// ISSUE 19: Lift navigation context to TanStack Router to preserve state on tab switch
+type MedicationsSearch = { tab?: 'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY'; };
+
 export const Route = createFileRoute('/clinical/medications')({
+  validateSearch: (search: Record<string, unknown>): MedicationsSearch => ({
+    tab: (search.tab as 'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY') || 'DIGITAL_MAR',
+  }),
   component: MedicationsModule,
 });
 
 function MedicationsModule() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
+  const { tab } = Route.useSearch();
+  const navigate = useNavigate({ from: Route.fullPath });
   
-  const [activeTab, setActiveTab] = useState<'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY'>('DIGITAL_MAR');
+  const activeTab = tab || 'DIGITAL_MAR';
+  const setActiveTab = (newTab: 'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY') => {
+    navigate({ search: { tab: newTab } });
+  };
+
   const [exportError, setExportError] = useState<string | null>(null);
-  
   const [isPrescriptionModalOpen, setIsPrescriptionModalOpen] = useState(false);
   const [editingPrescription, setEditingPrescription] = useState<Prescription | null>(null);
 
-  // --- STRICT NETWORK HEARTBEAT ---
+  // ISSUE 13: Lightweight 60-second heartbeat to reduce database noise
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
@@ -41,7 +52,7 @@ function MedicationsModule() {
     };
 
     checkConnection();
-    const interval = setInterval(checkConnection, 15000); 
+    const interval = setInterval(checkConnection, 60000); 
 
     const handleOnline = () => checkConnection();
     const handleOffline = () => setIsOnline(false);
@@ -56,53 +67,41 @@ function MedicationsModule() {
     };
   }, []);
 
-  const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
+  // ISSUE 1: Replaced local useState array with direct useQuery synchronization
+  const { data: prescriptions = [], isLoading: loadingRx } = useQuery({
+    queryKey: ['prescriptions', 'active'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('prescriptions')
+        .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements, date_of_birth, status)')
+        .eq('status', 'ACTIVE')
+        .order('start_date', { ascending: false });
+      if (error) throw error;
+      return data as Prescription[];
+    },
+    enabled: isOnline,
+  });
 
   useEffect(() => {
-    // Only execute data fetch if we are online
-    if (isOnline) {
-      const fetchRx = async () => {
-        const { data, error } = await supabase
-          .from('prescriptions')
-          .select('*, animals(id, name, species, location, gender, flying_weight, weight_unit, special_requirements, date_of_birth, status)')
-          .eq('status', 'ACTIVE')
-          .order('start_date', { ascending: false });
-        if (!error && data) setPrescriptions(data as Prescription[]);
-      };
-      fetchRx();
-    }
-  }, [isOnline]);
-
-  useEffect(() => {
+    if (!user?.id) return;
+    // ISSUE 2: Dynamic channel names prevent stale registrations across tenants
     const adminChannel = supabase
-      .channel('medication_administrations_changes')
+      .channel(`medication_administrations_changes_${user.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'medication_administrations' }, () => {
         queryClient.invalidateQueries({ queryKey: ['medication_administrations'], refetchType: 'active' });
-      })
-      .subscribe();
+      }).subscribe();
 
     const rxChannel = supabase
-      .channel('prescriptions_changes')
+      .channel(`prescriptions_changes_${user.id}`)
       .on('postgres_changes', { event: '*', schema: 'public', table: 'prescriptions' }, () => {
         queryClient.invalidateQueries({ queryKey: ['prescriptions'], refetchType: 'active' });
-      })
-      .subscribe();
+      }).subscribe();
 
     return () => { 
       supabase.removeChannel(adminChannel); 
       supabase.removeChannel(rxChannel); 
     };
-  }, [queryClient]);
-
-  const handleOpenNewOrder = () => {
-    setEditingPrescription(null);
-    setIsPrescriptionModalOpen(true);
-  };
-
-  const handleEditOrder = (rx: Prescription) => {
-    setEditingPrescription(rx);
-    setIsPrescriptionModalOpen(true);
-  };
+  }, [queryClient, user?.id]);
 
   const handlePrintUnifiedMar = async (rx: Prescription, setLoading: (b: boolean) => void) => {
     setLoading(true);
@@ -123,26 +122,20 @@ function MedicationsModule() {
     }
   };
 
-  // --- STRICT LOCKOUT RENDER ---
-  if (!isOnline) {
-    return (
-      <div className="max-w-7xl mx-auto space-y-6 pb-32">
-        <div className="bg-slate-900 text-white p-12 rounded-2xl shadow-2xl flex flex-col items-center justify-center text-center min-h-[60vh] border border-slate-800">
-          <WifiOff size={64} className="mb-6 text-blue-500" />
-          <h2 className="text-3xl font-black uppercase tracking-widest mb-3">Clinical Dispensary Locked</h2>
-          <p className="font-bold text-slate-400 max-w-lg text-sm leading-relaxed">
-            To enforce veterinary data integrity and prevent split-brain double dosing, this module requires an active database connection. All caches are suspended.
-          </p>
-          <div className="mt-8 px-6 py-3 bg-slate-800 rounded-xl text-xs font-black uppercase tracking-widest text-slate-300 flex items-center gap-3 border border-slate-700">
-            <Loader2 size={16} className="animate-spin text-blue-500" /> Securing connection...
-          </div>
-        </div>
-      </div>
-    );
-  }
-
   return (
     <div className="max-w-7xl mx-auto space-y-6 pb-24">
+      {/* ISSUE 14: Non-blocking sticky banner preserves user form inputs while offline */}
+      {!isOnline && (
+        <div className="sticky top-4 z-40 bg-rose-600 text-white p-4 rounded-xl shadow-lg flex items-center justify-between animate-in fade-in slide-in-from-top-4">
+          <div className="flex items-center gap-3">
+            <WifiOff size={20} />
+            <div>
+              <p className="font-black uppercase tracking-widest text-xs">Database Disconnected</p>
+              <p className="text-sm font-medium text-rose-100">Writes are temporarily locked to prevent split-brain double-dosing.</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {exportError && (
         <div className="bg-rose-50 border border-rose-200 text-rose-800 p-4 rounded-xl shadow-sm flex items-center gap-3 animate-in fade-in">
@@ -157,7 +150,7 @@ function MedicationsModule() {
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Prescription Management & Digital MAR</p>
         </div>
         <div className="flex gap-2">
-          <button onClick={handleOpenNewOrder} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold uppercase tracking-widest text-[10px] hover:bg-blue-700 shadow-[0_0_15px_rgba(37,99,235,0.2)] transition-all">
+          <button onClick={() => { setEditingPrescription(null); setIsPrescriptionModalOpen(true); }} className="flex items-center gap-2 px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold uppercase tracking-widest text-[10px] hover:bg-blue-700 shadow-[0_0_15px_rgba(37,99,235,0.2)] transition-all">
             <Pill size={14} /> Provision Order
           </button>
         </div>
@@ -177,7 +170,7 @@ function MedicationsModule() {
 
       <div className="animate-in fade-in duration-300">
         {activeTab === 'DIGITAL_MAR' && <DigitalMAR prescriptions={prescriptions} isOnline={isOnline} />}
-        {activeTab === 'PRESCRIPTIONS' && <PrescriptionList prescriptions={prescriptions} onEditOrder={handleEditOrder} onPrintMar={handlePrintUnifiedMar} />}
+        {activeTab === 'PRESCRIPTIONS' && <PrescriptionList prescriptions={prescriptions} onEditOrder={(rx) => { setEditingPrescription(rx); setIsPrescriptionModalOpen(true); }} onPrintMar={handlePrintUnifiedMar} />}
         {activeTab === 'HISTORY' && <MedicationHistory />}
       </div>
 
