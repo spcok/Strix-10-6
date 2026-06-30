@@ -107,10 +107,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
     mutationFn: async (payload: Partial<Animal>) => {
       if (initialData?.id) {
         const { data, error } = await supabase.from('animals').update(payload).eq('id', initialData.id).select().single();
-        if (error) throw error; return data;
+        if (error) throw error; 
+        return data;
       } else {
         const { data, error } = await supabase.from('animals').insert([payload]).select().single();
-        if (error) throw error; return data;
+        if (error) throw error; 
+        return data;
       }
     },
     onSettled: () => {
@@ -177,7 +179,6 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       try {
         const rawPayload = { ...value } as any;
 
-        // Process Storage Bucket Uploads
         if (rawPayload.profile_image_url instanceof Blob) {
           rawPayload.profile_image_url = await uploadToSupabase(rawPayload.profile_image_url, 'profiles');
         }
@@ -185,14 +186,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
           rawPayload.distribution_map_url = await uploadToSupabase(rawPayload.distribution_map_url, 'maps');
         }
 
-        // THE FIX: Strict separation of Nullable numerics vs Non-Null strict defaults
         const nullableNumerics = ['flying_weight', 'winter_weight', 'average_target_weight', 'target_day_temp_c', 'target_night_temp_c', 'water_tipping_temp', 'target_humidity_min_percent', 'target_humidity_max_percent'];
         nullableNumerics.forEach(key => {
            if (rawPayload[key] === '' || rawPayload[key] === null || rawPayload[key] === undefined) rawPayload[key] = null;
            else rawPayload[key] = Number(rawPayload[key]);
         });
 
-        // Enforce DB NOT NULL constraints
         rawPayload.display_order = (rawPayload.display_order === '' || rawPayload.display_order === null) ? 0 : Number(rawPayload.display_order);
         rawPayload.census_count = (rawPayload.census_count === '' || rawPayload.census_count === null) ? 1 : Number(rawPayload.census_count);
 
@@ -210,7 +209,21 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
           rawPayload.ring_number = '';
         }
 
-        await saveAnimalMutation.mutateAsync(rawPayload);
+        const savedAnimal = await saveAnimalMutation.mutateAsync(rawPayload);
+
+        // --- INTERNAL MOVEMENT LOGGING ---
+        if (initialData?.id && initialData.location !== rawPayload.location) {
+          await supabase.from('internal_movements').insert([{
+            animal_id: savedAnimal.id,
+            from_location: initialData.location || 'Unassigned',
+            to_location: rawPayload.location || 'Unassigned',
+            reason: 'Location updated via profile edit',
+            movement_date: new Date().toISOString(),
+            is_deleted: false
+          }]);
+          queryClient.invalidateQueries({ queryKey: ['internal_movements'] });
+        }
+
         onClose();
       } catch (err: any) {
         setUploadErrorMsg(err.message || 'An error occurred while saving.');
@@ -229,8 +242,19 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-[100] bg-slate-900/60 backdrop-blur-sm overflow-hidden flex items-center justify-center p-4 sm:p-6">
-      <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl flex flex-col max-h-[95vh] border border-slate-200 overflow-hidden">
+    // FIX: Separated the immutable backdrop from the modal container. 
+    // This locks the blur to the screen 100% of the time, and uses flex to safely center the modal.
+    <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
+      
+      {/* 1. IMMUTABLE BACKGROUND BLUR */}
+      <div 
+        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" 
+        onClick={handleSafeClose}
+        aria-hidden="true"
+      ></div>
+
+      {/* 2. THE MODAL CONTAINER (max-h-[85dvh] protects against tablet bottom-bar interception) */}
+      <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl flex flex-col max-h-[85dvh] border border-slate-200 overflow-hidden relative z-10">
         
         {/* Header */}
         <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50 shrink-0">
@@ -424,7 +448,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
             <button type="button" onClick={handleSafeClose} className="w-full sm:w-auto px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">Cancel</button>
             <form.Subscribe selector={(state) => [state.canSubmit, state.isSubmitting]}>
               {([canSubmit, isSubmitting]) => (
-                <button type="submit" form="animal-mutation-form" disabled={!canSubmit || isSubmitting || saveAnimalMutation.isPending} className="w-full sm:w-auto flex items-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-[0_0_15px_rgba(16,185,129,0.15)]">
+                <button type="submit" form="animal-mutation-form" disabled={!canSubmit || isSubmitting || saveAnimalMutation.isPending} className="w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-2.5 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white rounded-xl font-bold text-xs uppercase tracking-widest transition-all shadow-[0_0_15px_rgba(16,185,129,0.15)]">
                   {(isSubmitting || saveAnimalMutation.isPending) ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} 
                   {(isSubmitting || saveAnimalMutation.isPending) ? 'Processing...' : (initialData ? 'Update Record' : 'Commit Record')}
                 </button>
