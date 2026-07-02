@@ -17,7 +17,7 @@ export const Route = createFileRoute('/clinical/medications')({
 
 function MedicationsModule() {
   const queryClient = useQueryClient();
-  const { user } = useAuth();
+  const { user, profile } = useAuth();
   
   const [activeTab, setActiveTab] = useState<'DIGITAL_MAR' | 'PRESCRIPTIONS' | 'HISTORY'>('DIGITAL_MAR');
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -78,7 +78,7 @@ function MedicationsModule() {
       await marExportService.exportUnifiedMAR(
         rx.animals, 
         patientPrescriptions, 
-        user?.name || 'Staff', 
+        profile?.name || 'Staff', 
         user?.id || 'Unknown-ID'
       );
     } catch (error) {

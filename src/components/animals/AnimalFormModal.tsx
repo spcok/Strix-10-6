@@ -25,10 +25,11 @@ type TabId = typeof TABS[number]['id'];
 
 // --- ISOLATED SUB-COMPONENTS ---
 function FormInput({ field, label, type = 'text', placeholder, disabled = false }: { field: any; label: string; type?: string; placeholder?: string; disabled?: boolean }) {
-  const hasError = field.state?.meta?.errors?.length > 0 && field.state?.meta?.isTouched;
+  // STRICT UI: Highlight red if field has errors
+  const hasError = field.state?.meta?.errors?.length > 0;
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : 'text-slate-500'}`}>{label}</label>
+    <div className="flex flex-col gap-1.5 w-full">
+      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : hasError ? 'text-rose-500' : 'text-slate-500'}`}>{label}</label>
       {type === 'textarea' ? (
         <textarea
           value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)}
@@ -44,21 +45,23 @@ function FormInput({ field, label, type = 'text', placeholder, disabled = false 
           className={`w-full p-2.5 rounded-xl outline-none transition-all text-sm font-medium shadow-sm ${disabled ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' : hasError ? 'bg-rose-50 border-rose-300 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 text-rose-900' : 'bg-white border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900'}`}
         />
       )}
+      {hasError && <span className="text-[10px] font-bold text-rose-500">{field.state.meta.errors.join(', ')}</span>}
     </div>
   );
 }
 
 function FormSelect({ field, label, options, disabled = false }: { field: any; label: string; options: { value: string, label: string }[]; disabled?: boolean }) {
-  const hasError = field.state?.meta?.errors?.length > 0 && field.state?.meta?.isTouched;
+  const hasError = field.state?.meta?.errors?.length > 0;
   return (
-    <div className="flex flex-col gap-1.5">
-      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : 'text-slate-500'}`}>{label}</label>
+    <div className="flex flex-col gap-1.5 w-full">
+      <label className={`text-[10px] font-black uppercase tracking-widest ${disabled ? 'text-slate-300' : hasError ? 'text-rose-500' : 'text-slate-500'}`}>{label}</label>
       <select
         value={field.state.value} onBlur={field.handleBlur} onChange={(e) => field.handleChange(e.target.value)} disabled={disabled}
         className={`w-full p-2.5 rounded-xl outline-none transition-all text-sm font-medium shadow-sm ${disabled ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed' : hasError ? 'bg-rose-50 border-rose-300 focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 text-rose-900' : 'bg-white border-slate-200 focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 text-slate-900'}`}
       >
         {options.map((opt) => <option key={opt.value} value={opt.value}>{opt.label}</option>)}
       </select>
+      {hasError && <span className="text-[10px] font-bold text-rose-500">{field.state.meta.errors.join(', ')}</span>}
     </div>
   );
 }
@@ -76,7 +79,7 @@ function FormCheckbox({ field, label }: { field: any; label: string }) {
 export default function AnimalFormModal({ isOpen, onClose, initialData }: AnimalFormModalProps) {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<TabId>('core');
-  const [uploadErrorMsg, setUploadErrorMsg] = useState<string | null>(null);
+  const [customErrorMsg, setCustomErrorMsg] = useState<string | null>(null);
 
   const { data: existingGroups = [] } = useQuery({ 
     queryKey: ['animal-groups'], 
@@ -96,7 +99,8 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
 
   const uploadToSupabase = async (file: Blob, folder: string): Promise<string> => {
     const fileExt = file.type === 'image/png' ? 'png' : 'jpg';
-    const fileName = `${folder}/${crypto.randomUUID()}.${fileExt}`;
+    const uuid = typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2);
+    const fileName = `${folder}/${uuid}.${fileExt}`;
     const { error } = await supabase.storage.from('media').upload(fileName, file, { contentType: file.type || 'image/jpeg' });
     if (error) throw error;
     const { data } = supabase.storage.from('media').getPublicUrl(fileName);
@@ -115,10 +119,14 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         return data;
       }
     },
-    onSettled: () => {
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['animals'] });
       queryClient.invalidateQueries({ queryKey: ['animal_profile'] });
+      onClose();
     },
+    onError: (err: any) => {
+      setCustomErrorMsg(err.message || 'An error occurred while saving to the database.');
+    }
   });
 
   const form = useForm({
@@ -175,7 +183,21 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       display_order: initialData?.display_order ?? ''
     },
     onSubmit: async ({ value }) => {
-      setUploadErrorMsg(null);
+      setCustomErrorMsg(null);
+      
+      // STRICT MANUAL PRE-FLIGHT CHECKS FOR ZLA CROSS-FIELD COMPLIANCE
+      if (value.has_no_id && !value.description?.trim() && !value.profile_image_url) {
+        setCustomErrorMsg("ZLA COMPLIANCE: If an animal has no formal ID (Ring/Microchip), you MUST provide a visual description or a profile photo.");
+        setActiveTab('notes'); // Navigate them to the tab where description lives
+        return;
+      }
+      
+      if (!value.has_no_id && !value.microchip_id?.trim() && !value.ring_number?.trim()) {
+        setCustomErrorMsg("ZLA COMPLIANCE: You must provide a Ring Number or Microchip, OR explicitly check 'Entity holds no formal identification'.");
+        setActiveTab('id');
+        return;
+      }
+
       try {
         const rawPayload = { ...value } as any;
 
@@ -224,9 +246,8 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
           queryClient.invalidateQueries({ queryKey: ['internal_movements'] });
         }
 
-        onClose();
       } catch (err: any) {
-        setUploadErrorMsg(err.message || 'An error occurred while saving.');
+        setCustomErrorMsg(err.message || 'An error occurred while saving.');
       }
     }
   });
@@ -242,18 +263,15 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
   if (!isOpen) return null;
 
   return (
-    // FIX: Separated the immutable backdrop from the modal container. 
-    // This locks the blur to the screen 100% of the time, and uses flex to safely center the modal.
     <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 sm:p-6">
       
-      {/* 1. IMMUTABLE BACKGROUND BLUR */}
+      {/* IMMUTABLE BACKGROUND BLUR */}
       <div 
         className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm" 
         onClick={handleSafeClose}
         aria-hidden="true"
       ></div>
 
-      {/* 2. THE MODAL CONTAINER (max-h-[85dvh] protects against tablet bottom-bar interception) */}
       <div className="bg-white w-full max-w-4xl rounded-2xl shadow-2xl flex flex-col max-h-[85dvh] border border-slate-200 overflow-hidden relative z-10">
         
         {/* Header */}
@@ -276,12 +294,26 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
 
         {/* Form Body */}
         <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-white">
-          {(saveAnimalMutation.isError || uploadErrorMsg) && (
+          
+          {customErrorMsg && (
             <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-700">
               <AlertCircle size={18} className="shrink-0 mt-0.5" />
-              <div className="text-sm font-medium">{uploadErrorMsg || 'Failed to save database record.'}</div>
+              <div className="text-sm font-medium">{customErrorMsg}</div>
             </div>
           )}
+
+          {/* STRICT VALIDATION EXPOSURE */}
+          <form.Subscribe selector={(state) => state.errorMap}>
+             {(errorMap) => {
+               const hasErrors = errorMap && Object.values(errorMap).some(err => err);
+               return hasErrors ? (
+                 <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-800 shadow-sm animate-in fade-in">
+                   <AlertCircle size={18} className="shrink-0 mt-0.5" />
+                   <div className="text-sm font-bold">ZLA Validation Failed. Please correct the highlighted fields marked with red below.</div>
+                 </div>
+               ) : null;
+             }}
+          </form.Subscribe>
 
           <form id="animal-mutation-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-6">
             
@@ -309,9 +341,17 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                   </form.Subscribe>
                 </div>
 
-                <form.Field name="name" validators={{ onChange: ({ value }) => !value ? 'Name is required' : undefined }}>{(field) => <FormInput field={field as any} label="Animal Name *" placeholder="e.g. Apollo" />}</form.Field>
+                {/* ZLA MANDATORY CORE FIELDS */}
+                <form.Field name="name" validators={{ onChange: ({ value }) => !value.trim() ? 'Name required' : undefined, onSubmit: ({ value }) => !value.trim() ? 'Name required' : undefined }}>
+                  {(field) => <FormInput field={field as any} label="Animal Name *" placeholder="e.g. Apollo" />}
+                </form.Field>
+                
                 <form.Field name="location">{(field) => <FormSelect field={field as any} label="Location" options={[{ value: '', label: '-- Unassigned --' }, ...locations.map((l: any) => ({ value: l.name, label: l.name }))]} />}</form.Field>
-                <form.Field name="species" validators={{ onChange: ({ value }) => !value ? 'Species is required' : undefined }}>{(field) => <FormInput field={field as any} label="Common Species *" placeholder="e.g. Golden Eagle" />}</form.Field>
+                
+                <form.Field name="species" validators={{ onChange: ({ value }) => !value.trim() ? 'Species required' : undefined, onSubmit: ({ value }) => !value.trim() ? 'Species required' : undefined }}>
+                  {(field) => <FormInput field={field as any} label="Common Species *" placeholder="e.g. Golden Eagle" />}
+                </form.Field>
+                
                 <form.Field name="latin_name">{(field) => <FormInput field={field as any} label="Latin / Scientific Name" placeholder="e.g. Aquila chrysaetos" />}</form.Field>
                 <form.Field name="category">{(field) => <FormSelect field={field as any} label="Category" options={[{ value: 'OWL', label: 'Owl' }, { value: 'RAPTOR', label: 'Raptor' }, { value: 'MAMMAL', label: 'Mammal' }, { value: 'EXOTIC', label: 'Exotic' }]} />}</form.Field>
                 <form.Field name="status">{(field) => <FormSelect field={field as any} label="System Status" options={[{ value: 'ON_DISPLAY', label: 'On Display' }, { value: 'OFF_DISPLAY', label: 'Off Display' }, { value: 'QUARANTINE', label: 'Quarantine' }, { value: 'MEDICAL', label: 'Medical' }, { value: 'OFFSITE', label: 'Stored Offsite' }]} />}</form.Field>
@@ -325,8 +365,12 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 </form.Subscribe>
 
                 <form.Field name="census_count">{(field) => <FormInput field={field as any} label="Census Count (Headcount)" type="number" />}</form.Field>
-                <form.Field name="date_of_birth">{(field) => <FormInput field={field as any} label="Date of Birth / Est. Origin" type="date" />}</form.Field>
-                <form.Field name="is_dob_unknown">{(field) => <FormCheckbox field={field as any} label="Date of Birth is Approximate / Unknown" />}</form.Field>
+                
+                <form.Field name="date_of_birth">{(field) => <FormInput field={field as any} label="Date of Birth / Est. Hatch" type="date" />}</form.Field>
+                
+                <div className="flex items-center mt-6">
+                   <form.Field name="is_dob_unknown">{(field) => <FormCheckbox field={field as any} label="DOB is Approximate" />}</form.Field>
+                </div>
 
                 <div className="sm:col-span-2 pt-4 border-t border-slate-100">
                   <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Profile Photo (4:3) - Uploads to Storage Bucket</label>
@@ -398,10 +442,21 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 <div className="sm:col-span-2 pb-4 border-b border-slate-100">
                   <form.Field name="is_venomous">{(field) => <FormCheckbox field={field as any} label="Species is Venomous" />}</form.Field>
                 </div>
-                <form.Field name="acquisition_date">{(field) => <FormInput field={field as any} label="Acquisition Date" type="date" />}</form.Field>
-                <form.Field name="acquisition_type">{(field) => <FormSelect field={field as any} label="Acquisition Type" options={[{ value: 'BRED', label: 'Captive Bred' }, { value: 'PURCHASED', label: 'Purchased' }, { value: 'DONATED', label: 'Donated / Rescue' }, { value: 'LOAN', label: 'On Loan' }]} />}</form.Field>
-                <form.Field name="origin">{(field) => <FormInput field={field as any} label="Breeder / Origin Source" />}</form.Field>
-                <form.Field name="origin_location">{(field) => <FormInput field={field as any} label="Origin Location / Area" />}</form.Field>
+                
+                {/* ZLA MANDATORY ORIGIN FIELDS */}
+                <form.Field name="acquisition_date" validators={{ onSubmit: ({ value }) => !value ? 'Acquisition Date is required for ZLA auditing' : undefined }}>
+                  {(field) => <FormInput field={field as any} label="Acquisition / Origin Date *" type="date" />}
+                </form.Field>
+                
+                <form.Field name="acquisition_type" validators={{ onSubmit: ({ value }) => !value ? 'Acquisition Type is required' : undefined }}>
+                  {(field) => <FormSelect field={field as any} label="Acquisition Type *" options={[{ value: 'BRED', label: 'Captive Bred' }, { value: 'PURCHASED', label: 'Purchased' }, { value: 'DONATED', label: 'Donated / Rescue' }, { value: 'LOAN', label: 'On Loan' }]} />}
+                </form.Field>
+                
+                <form.Field name="origin" validators={{ onSubmit: ({ value }) => !value.trim() ? 'Origin source is required for traceability' : undefined }}>
+                  {(field) => <FormInput field={field as any} label="Breeder / Origin Source *" placeholder="e.g. Scottish Owl Centre" />}
+                </form.Field>
+                
+                <form.Field name="origin_location">{(field) => <FormInput field={field as any} label="Origin Area / Country" />}</form.Field>
                 
                 <div className="sm:col-span-2 pt-4 border-t border-slate-100">
                   <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2">Distribution Map</label>
@@ -432,7 +487,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                     )}
                   </form.Subscribe>
                   <div className="sm:col-span-2">
-                    <form.Field name="description">{(field) => <FormInput field={field as any} label="General Description / Public Notes" type="textarea" />}</form.Field>
+                    <form.Field name="description">{(field) => <FormInput field={field as any} label="General Description / Identifying Marks" type="textarea" placeholder="Crucial if animal lacks formal ID..." />}</form.Field>
                   </div>
                   <form.Field name="display_order">{(field) => <FormInput field={field as any} label="Display Sequence (UI Override)" type="number" />}</form.Field>
                </div>
@@ -442,7 +497,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-between bg-slate-50 shrink-0">
+        <div className="px-6 py-4 border-t border-slate-100 flex items-center justify-between bg-slate-50 shrink-0 relative z-20">
           <div className="text-[10px] font-black text-slate-400 uppercase tracking-widest hidden sm:block">{activeTab} active</div>
           <div className="flex items-center gap-3 w-full sm:w-auto">
             <button type="button" onClick={handleSafeClose} className="w-full sm:w-auto px-5 py-2.5 text-xs font-bold uppercase tracking-widest text-slate-500 hover:text-slate-900 hover:bg-slate-200 rounded-xl transition-colors">Cancel</button>
