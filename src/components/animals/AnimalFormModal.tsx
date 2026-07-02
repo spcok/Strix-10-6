@@ -1,11 +1,84 @@
 import React, { useState } from 'react';
 import { useForm } from '@tanstack/react-form';
 import { useMutation, useQueryClient, useQuery } from '@tanstack/react-query';
-import { X, Save, Loader2, AlertCircle, Users, User } from 'lucide-react';
+import { X, Save, Loader2, AlertCircle, Users, User, ShieldAlert } from 'lucide-react';
+import { z } from 'zod'; // THE FIREWALL
 import { supabase } from '../../lib/supabase';
 import { AnimalCategory, AnimalStatus, RecordType, Animal } from '../../types';
 import { ImageUploader } from '../ui/ImageUploader';
 import { IUCNBadge } from './IUCNBadge';
+
+// ------------------------------------------------------------------
+// ZOD FIREWALL: ZLA 1981 SSSMZP & DATABASE INTEGRITY SCHEMA
+// ------------------------------------------------------------------
+const ZlaComplianceSchema = z.object({
+  // DB NOT NULL CONSTRAINTS
+  census_count: z.number().min(1),
+  weight_unit: z.string().min(1),
+  display_order: z.number(),
+
+  // ZLA MANDATORY BASELINE
+  name: z.string().min(1, "ZLA COMPLIANCE: Animal Name is required."),
+  species: z.string().min(1, "ZLA COMPLIANCE: Common Species name is required."),
+  latin_name: z.string().min(1, "ZLA COMPLIANCE: Scientific/Latin name is required by SSSMZP."),
+  gender: z.string().min(1, "ZLA COMPLIANCE: Sex must be recorded (Select 'Unsexed/Unknown' if not determinable)."),
+  
+  // ORIGIN & ACQUISITION
+  acquisition_date: z.string().min(1, "ZLA COMPLIANCE: Arrival/Acquisition date is strictly required."),
+  acquisition_type: z.string().min(1, "ZLA COMPLIANCE: Acquisition method is required."),
+  origin: z.string().min(1, "ZLA COMPLIANCE: Previous holding/origin source is required for traceability."),
+
+  // CONDITIONAL FIELDS
+  date_of_birth: z.any().optional().nullable(),
+  is_dob_unknown: z.boolean(),
+  has_no_id: z.boolean(),
+  microchip_id: z.string().optional().nullable(),
+  ring_number: z.string().optional().nullable(),
+  description: z.string().optional().nullable(),
+  profile_image_url: z.any().optional().nullable(),
+  
+  // PASS-THROUGHS
+  record_type: z.string().optional().nullable(),
+  parent_group_id: z.string().optional().nullable(),
+  category: z.string().optional().nullable(),
+  location: z.string().optional().nullable(),
+  status: z.string().optional().nullable(),
+  flying_weight: z.any().optional().nullable(),
+  winter_weight: z.any().optional().nullable(),
+  average_target_weight: z.any().optional().nullable(),
+  ambient_temp_only: z.boolean().optional().nullable(),
+  target_day_temp_c: z.any().optional().nullable(),
+  target_night_temp_c: z.any().optional().nullable(),
+  water_tipping_temp: z.any().optional().nullable(),
+  target_humidity_min_percent: z.any().optional().nullable(),
+  target_humidity_max_percent: z.any().optional().nullable(),
+  misting_frequency: z.string().optional().nullable(),
+  special_requirements: z.string().optional().nullable(),
+  critical_husbandry_notes: z.string().optional().nullable(),
+  hazard_rating: z.string().optional().nullable(),
+  is_venomous: z.boolean().optional().nullable(),
+  red_list_status: z.string().optional().nullable(),
+  origin_location: z.string().optional().nullable(),
+  is_boarding: z.boolean().optional().nullable(),
+  is_quarantine: z.boolean().optional().nullable(),
+  lineage_unknown: z.boolean().optional().nullable(),
+  sire_id: z.string().optional().nullable(),
+  dam_id: z.string().optional().nullable(),
+  distribution_map_url: z.any().optional().nullable()
+}).superRefine((data, ctx) => {
+  // 1. ZLA ID RULE
+  const hasFormalId = (data.microchip_id && data.microchip_id.trim() !== '') || (data.ring_number && data.ring_number.trim() !== '');
+  if (!data.has_no_id && !hasFormalId) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['ring_number'], message: "ZLA COMPLIANCE: Provide a Ring/Microchip number, or explicitly declare 'No Formal ID'." });
+  }
+  if (data.has_no_id && (!data.description || data.description.trim() === '') && !data.profile_image_url) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['description'], message: "ZLA COMPLIANCE: If lacking formal ID, a visual description or profile photo is legally required." });
+  }
+  // 2. ZLA AGE RULE
+  if (!data.is_dob_unknown && (!data.date_of_birth || String(data.date_of_birth).trim() === '')) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['date_of_birth'], message: "ZLA COMPLIANCE: Date of Birth is required, or explicitly mark it as Approximate/Unknown." });
+  }
+});
 
 interface AnimalFormModalProps {
   isOpen: boolean;
@@ -25,7 +98,6 @@ type TabId = typeof TABS[number]['id'];
 
 // --- ISOLATED SUB-COMPONENTS ---
 function FormInput({ field, label, type = 'text', placeholder, disabled = false }: { field: any; label: string; type?: string; placeholder?: string; disabled?: boolean }) {
-  // STRICT UI: Highlight red if field has errors
   const hasError = field.state?.meta?.errors?.length > 0;
   return (
     <div className="flex flex-col gap-1.5 w-full">
@@ -79,7 +151,10 @@ function FormCheckbox({ field, label }: { field: any; label: string }) {
 export default function AnimalFormModal({ isOpen, onClose, initialData }: AnimalFormModalProps) {
   const queryClient = useQueryClient();
   const [activeTab, setActiveTab] = useState<TabId>('core');
-  const [customErrorMsg, setCustomErrorMsg] = useState<string | null>(null);
+  
+  // Error States
+  const [firewallError, setFirewallError] = useState<{ message: string, path: string } | null>(null);
+  const [systemError, setSystemError] = useState<string | null>(null);
 
   const { data: existingGroups = [] } = useQuery({ 
     queryKey: ['animal-groups'], 
@@ -125,7 +200,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       onClose();
     },
     onError: (err: any) => {
-      setCustomErrorMsg(err.message || 'An error occurred while saving to the database.');
+      setSystemError(err.message || 'An error occurred while saving to the database.');
     }
   });
 
@@ -141,12 +216,10 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       location: initialData?.location || '', 
       profile_image_url: initialData?.profile_image_url || (null as string | Blob | null),
       distribution_map_url: initialData?.distribution_map_url || (null as string | Blob | null),
-      
       status: initialData?.status || 'ON_DISPLAY', 
       gender: initialData?.gender || '', 
       date_of_birth: initialData?.date_of_birth || '', 
       is_dob_unknown: initialData?.is_dob_unknown || false, 
-      
       microchip_id: initialData?.microchip_id || '', 
       ring_number: initialData?.ring_number || '', 
       has_no_id: initialData?.has_no_id || false, 
@@ -154,7 +227,6 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       flying_weight: initialData?.flying_weight || '', 
       winter_weight: initialData?.winter_weight || '', 
       average_target_weight: initialData?.average_target_weight || '', 
-      
       ambient_temp_only: initialData?.ambient_temp_only || false, 
       target_day_temp_c: initialData?.target_day_temp_c || '', 
       target_night_temp_c: initialData?.target_night_temp_c || '', 
@@ -164,18 +236,15 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       misting_frequency: initialData?.misting_frequency || '', 
       special_requirements: initialData?.special_requirements || '', 
       critical_husbandry_notes: initialData?.critical_husbandry_notes || '',
-      
       hazard_rating: initialData?.hazard_rating || 'LOW', 
       is_venomous: initialData?.is_venomous || false, 
       red_list_status: initialData?.red_list_status || 'LC', 
-      
       acquisition_date: initialData?.acquisition_date || '', 
       acquisition_type: initialData?.acquisition_type || 'BRED', 
       origin: initialData?.origin || '', 
       origin_location: initialData?.origin_location || '', 
       is_boarding: initialData?.is_boarding || false, 
       is_quarantine: initialData?.is_quarantine || false, 
-      
       lineage_unknown: initialData?.lineage_unknown || false, 
       sire_id: initialData?.sire_id || '', 
       dam_id: initialData?.dam_id || '', 
@@ -183,31 +252,32 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
       display_order: initialData?.display_order ?? ''
     },
     onSubmit: async ({ value }) => {
-      setCustomErrorMsg(null);
+      setFirewallError(null);
+      setSystemError(null);
+
+      // --- ZOD FIREWALL INITIATION ---
+      const validation = ZlaComplianceSchema.safeParse(value);
       
-      // STRICT MANUAL PRE-FLIGHT CHECKS FOR ZLA CROSS-FIELD COMPLIANCE
-      if (value.has_no_id && !value.description?.trim() && !value.profile_image_url) {
-        setCustomErrorMsg("ZLA COMPLIANCE: If an animal has no formal ID (Ring/Microchip), you MUST provide a visual description or a profile photo.");
-        setActiveTab('notes'); // Navigate them to the tab where description lives
-        return;
-      }
-      
-      if (!value.has_no_id && !value.microchip_id?.trim() && !value.ring_number?.trim()) {
-        setCustomErrorMsg("ZLA COMPLIANCE: You must provide a Ring Number or Microchip, OR explicitly check 'Entity holds no formal identification'.");
-        setActiveTab('id');
-        return;
+      if (!validation.success) {
+        const firstIssue = validation.error.errors[0];
+        setFirewallError({ message: firstIssue.message, path: firstIssue.path[0] as string });
+        
+        // Auto-navigate to correct tab
+        if (['name', 'species', 'latin_name', 'gender', 'date_of_birth'].includes(firstIssue.path[0] as string)) setActiveTab('core');
+        else if (['ring_number', 'microchip_id'].includes(firstIssue.path[0] as string)) setActiveTab('id');
+        else if (['acquisition_date', 'acquisition_type', 'origin'].includes(firstIssue.path[0] as string)) setActiveTab('safety');
+        else if (firstIssue.path[0] === 'description') setActiveTab('notes');
+        
+        return; // HARD BLOCK
       }
 
       try {
         const rawPayload = { ...value } as any;
 
-        if (rawPayload.profile_image_url instanceof Blob) {
-          rawPayload.profile_image_url = await uploadToSupabase(rawPayload.profile_image_url, 'profiles');
-        }
-        if (rawPayload.distribution_map_url instanceof Blob) {
-          rawPayload.distribution_map_url = await uploadToSupabase(rawPayload.distribution_map_url, 'maps');
-        }
+        if (rawPayload.profile_image_url instanceof Blob) rawPayload.profile_image_url = await uploadToSupabase(rawPayload.profile_image_url, 'profiles');
+        if (rawPayload.distribution_map_url instanceof Blob) rawPayload.distribution_map_url = await uploadToSupabase(rawPayload.distribution_map_url, 'maps');
 
+        // NULL COERCION
         const nullableNumerics = ['flying_weight', 'winter_weight', 'average_target_weight', 'target_day_temp_c', 'target_night_temp_c', 'water_tipping_temp', 'target_humidity_min_percent', 'target_humidity_max_percent'];
         nullableNumerics.forEach(key => {
            if (rawPayload[key] === '' || rawPayload[key] === null || rawPayload[key] === undefined) rawPayload[key] = null;
@@ -219,21 +289,16 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
 
         if (rawPayload.date_of_birth === '') rawPayload.date_of_birth = null;
         if (rawPayload.acquisition_date === '') rawPayload.acquisition_date = null;
-        
         if (rawPayload.parent_group_id === '' || rawPayload.record_type === 'GROUP') rawPayload.parent_group_id = null;
         if (rawPayload.sire_id === '') rawPayload.sire_id = null;
         if (rawPayload.dam_id === '') rawPayload.dam_id = null;
         if (rawPayload.location === '') rawPayload.location = null;
         if (rawPayload.latin_name === '') rawPayload.latin_name = null;
-
-        if (rawPayload.has_no_id) {
-          rawPayload.microchip_id = '';
-          rawPayload.ring_number = '';
-        }
+        if (rawPayload.has_no_id) { rawPayload.microchip_id = ''; rawPayload.ring_number = ''; }
 
         const savedAnimal = await saveAnimalMutation.mutateAsync(rawPayload);
 
-        // --- INTERNAL MOVEMENT LOGGING ---
+        // LOGISTICS SYNC
         if (initialData?.id && initialData.location !== rawPayload.location) {
           await supabase.from('internal_movements').insert([{
             animal_id: savedAnimal.id,
@@ -247,7 +312,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         }
 
       } catch (err: any) {
-        setCustomErrorMsg(err.message || 'An error occurred while saving.');
+        setSystemError(err.message || 'An error occurred while saving.');
       }
     }
   });
@@ -295,25 +360,23 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
         {/* Form Body */}
         <div className="p-6 overflow-y-auto custom-scrollbar flex-1 bg-white">
           
-          {customErrorMsg && (
+          {systemError && (
             <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-700">
               <AlertCircle size={18} className="shrink-0 mt-0.5" />
-              <div className="text-sm font-medium">{customErrorMsg}</div>
+              <div className="text-sm font-medium">{systemError}</div>
             </div>
           )}
 
-          {/* STRICT VALIDATION EXPOSURE */}
-          <form.Subscribe selector={(state) => state.errorMap}>
-             {(errorMap) => {
-               const hasErrors = errorMap && Object.values(errorMap).some(err => err);
-               return hasErrors ? (
-                 <div className="mb-6 p-4 bg-rose-50 border border-rose-200 rounded-xl flex items-start gap-3 text-rose-800 shadow-sm animate-in fade-in">
-                   <AlertCircle size={18} className="shrink-0 mt-0.5" />
-                   <div className="text-sm font-bold">ZLA Validation Failed. Please correct the highlighted fields marked with red below.</div>
-                 </div>
-               ) : null;
-             }}
-          </form.Subscribe>
+          {/* THE FIREWALL NOTIFICATION PANEL */}
+          {firewallError && (
+            <div className="mb-6 p-4 bg-rose-50 border-2 border-rose-300 rounded-xl flex items-start gap-3 text-rose-900 shadow-md animate-in fade-in slide-in-from-top-2">
+              <ShieldAlert size={20} className="shrink-0 mt-0.5 text-rose-600" />
+              <div className="flex flex-col">
+                <span className="text-xs font-black uppercase tracking-widest text-rose-600">Compliance Audit Failure</span>
+                <span className="text-sm font-bold mt-1">{firewallError.message}</span>
+              </div>
+            </div>
+          )}
 
           <form id="animal-mutation-form" onSubmit={(e) => { e.preventDefault(); e.stopPropagation(); form.handleSubmit(); }} className="space-y-6">
             
@@ -341,35 +404,26 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                   </form.Subscribe>
                 </div>
 
-                {/* ZLA MANDATORY CORE FIELDS */}
-                <form.Field name="name" validators={{ onChange: ({ value }) => !value.trim() ? 'Name required' : undefined, onSubmit: ({ value }) => !value.trim() ? 'Name required' : undefined }}>
-                  {(field) => <FormInput field={field as any} label="Animal Name *" placeholder="e.g. Apollo" />}
-                </form.Field>
-                
+                <form.Field name="name">{(field) => <FormInput field={field as any} label="Animal Name *" placeholder="e.g. Apollo" />}</form.Field>
                 <form.Field name="location">{(field) => <FormSelect field={field as any} label="Location" options={[{ value: '', label: '-- Unassigned --' }, ...locations.map((l: any) => ({ value: l.name, label: l.name }))]} />}</form.Field>
-                
-                <form.Field name="species" validators={{ onChange: ({ value }) => !value.trim() ? 'Species required' : undefined, onSubmit: ({ value }) => !value.trim() ? 'Species required' : undefined }}>
-                  {(field) => <FormInput field={field as any} label="Common Species *" placeholder="e.g. Golden Eagle" />}
-                </form.Field>
-                
-                <form.Field name="latin_name">{(field) => <FormInput field={field as any} label="Latin / Scientific Name" placeholder="e.g. Aquila chrysaetos" />}</form.Field>
+                <form.Field name="species">{(field) => <FormInput field={field as any} label="Common Species *" placeholder="e.g. Golden Eagle" />}</form.Field>
+                <form.Field name="latin_name">{(field) => <FormInput field={field as any} label="Latin / Scientific Name *" placeholder="e.g. Aquila chrysaetos" />}</form.Field>
                 <form.Field name="category">{(field) => <FormSelect field={field as any} label="Category" options={[{ value: 'OWL', label: 'Owl' }, { value: 'RAPTOR', label: 'Raptor' }, { value: 'MAMMAL', label: 'Mammal' }, { value: 'EXOTIC', label: 'Exotic' }]} />}</form.Field>
                 <form.Field name="status">{(field) => <FormSelect field={field as any} label="System Status" options={[{ value: 'ON_DISPLAY', label: 'On Display' }, { value: 'OFF_DISPLAY', label: 'Off Display' }, { value: 'QUARANTINE', label: 'Quarantine' }, { value: 'MEDICAL', label: 'Medical' }, { value: 'OFFSITE', label: 'Stored Offsite' }]} />}</form.Field>
                 
                 <form.Subscribe selector={state => state.values.record_type}>
                   {(recordType) => (
                     <form.Field name="gender">
-                      {(field) => <FormSelect field={field as any} label="Gender" disabled={recordType === 'GROUP'} options={[{ value: '', label: 'Unknown / Mixed' }, { value: 'M', label: 'Male' }, { value: 'F', label: 'Female' }, { value: 'U', label: 'Unsexed' }]} />}
+                      {(field) => <FormSelect field={field as any} label="Gender *" disabled={recordType === 'GROUP'} options={[{ value: '', label: '-- Select --' }, { value: 'U', label: 'Unknown / Unsexed' }, { value: 'M', label: 'Male' }, { value: 'F', label: 'Female' }]} />}
                     </form.Field>
                   )}
                 </form.Subscribe>
 
                 <form.Field name="census_count">{(field) => <FormInput field={field as any} label="Census Count (Headcount)" type="number" />}</form.Field>
-                
-                <form.Field name="date_of_birth">{(field) => <FormInput field={field as any} label="Date of Birth / Est. Hatch" type="date" />}</form.Field>
+                <form.Field name="date_of_birth">{(field) => <FormInput field={field as any} label="Date of Birth / Est. Hatch *" type="date" />}</form.Field>
                 
                 <div className="flex items-center mt-6">
-                   <form.Field name="is_dob_unknown">{(field) => <FormCheckbox field={field as any} label="DOB is Approximate" />}</form.Field>
+                   <form.Field name="is_dob_unknown">{(field) => <FormCheckbox field={field as any} label="DOB is Approximate / Unknown" />}</form.Field>
                 </div>
 
                 <div className="sm:col-span-2 pt-4 border-t border-slate-100">
@@ -387,8 +441,8 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 <form.Subscribe selector={state => state.values.has_no_id}>
                   {(hasNoId) => (
                     <>
-                      <form.Field name="ring_number">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Ring Number" placeholder="e.g. A10-992" />}</form.Field>
-                      <form.Field name="microchip_id">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Microchip ID" />}</form.Field>
+                      <form.Field name="ring_number">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Ring Number *" placeholder="e.g. A10-992" />}</form.Field>
+                      <form.Field name="microchip_id">{(field) => <FormInput field={field as any} disabled={hasNoId} label="Microchip ID *" />}</form.Field>
                     </>
                   )}
                 </form.Subscribe>
@@ -444,15 +498,15 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                 </div>
                 
                 {/* ZLA MANDATORY ORIGIN FIELDS */}
-                <form.Field name="acquisition_date" validators={{ onSubmit: ({ value }) => !value ? 'Acquisition Date is required for ZLA auditing' : undefined }}>
+                <form.Field name="acquisition_date">
                   {(field) => <FormInput field={field as any} label="Acquisition / Origin Date *" type="date" />}
                 </form.Field>
                 
-                <form.Field name="acquisition_type" validators={{ onSubmit: ({ value }) => !value ? 'Acquisition Type is required' : undefined }}>
-                  {(field) => <FormSelect field={field as any} label="Acquisition Type *" options={[{ value: 'BRED', label: 'Captive Bred' }, { value: 'PURCHASED', label: 'Purchased' }, { value: 'DONATED', label: 'Donated / Rescue' }, { value: 'LOAN', label: 'On Loan' }]} />}
+                <form.Field name="acquisition_type">
+                  {(field) => <FormSelect field={field as any} label="Acquisition Type *" options={[{ value: '', label: '-- Select --' }, { value: 'BRED', label: 'Captive Bred' }, { value: 'PURCHASED', label: 'Purchased' }, { value: 'DONATED', label: 'Donated / Rescue' }, { value: 'LOAN', label: 'On Loan' }]} />}
                 </form.Field>
                 
-                <form.Field name="origin" validators={{ onSubmit: ({ value }) => !value.trim() ? 'Origin source is required for traceability' : undefined }}>
+                <form.Field name="origin">
                   {(field) => <FormInput field={field as any} label="Breeder / Origin Source *" placeholder="e.g. Scottish Owl Centre" />}
                 </form.Field>
                 
@@ -487,7 +541,7 @@ export default function AnimalFormModal({ isOpen, onClose, initialData }: Animal
                     )}
                   </form.Subscribe>
                   <div className="sm:col-span-2">
-                    <form.Field name="description">{(field) => <FormInput field={field as any} label="General Description / Identifying Marks" type="textarea" placeholder="Crucial if animal lacks formal ID..." />}</form.Field>
+                    <form.Field name="description">{(field) => <FormInput field={field as any} label="General Description / Identifying Marks *" type="textarea" placeholder="Crucial if animal lacks formal ID..." />}</form.Field>
                   </div>
                   <form.Field name="display_order">{(field) => <FormInput field={field as any} label="Display Sequence (UI Override)" type="number" />}</form.Field>
                </div>
