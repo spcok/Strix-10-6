@@ -1,11 +1,11 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, useQueries, queryOptions, useQueryClient } from '@tanstack/react-query';
+import { useQuery, queryOptions, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { useReactTable, getCoreRowModel, flexRender, ColumnDef } from '@tanstack/react-table';
 import { Scale, Thermometer, ChevronLeft, ChevronRight, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { Animal, DailyLog } from '../types';
+import { Animal } from '../types';
 
 import { FeedModal } from '../components/husbandry/FeedModal';
 import { WeightModal } from '../components/husbandry/WeightModal';
@@ -22,23 +22,15 @@ export const formatWeightDisplay = (grams: number | null | undefined, unit: stri
   return `${Math.round(grams)}g`;
 };
 
+// ------------------------------------------------------------------
+// QUERIES
+// ------------------------------------------------------------------
 const getAnimalsOptions = () => queryOptions({
   queryKey: ['animals', 'dashboard'],
   queryFn: async () => {
     const { data, error } = await supabase.from('animals').select('*').order('name');
     if (error) throw error;
     return data as Animal[];
-  }
-});
-
-const getLegacyLogsOptions = (date: string) => queryOptions({
-  queryKey: ['daily_logs', date],
-  queryFn: async () => {
-    if (!date) return [];
-    const start = new Date(`${date}T00:00:00`).toISOString();
-    const end = new Date(`${date}T23:59:59.999`).toISOString();
-    const { data } = await supabase.from('daily_logs').select('*').eq('is_deleted', false).gte('log_date', start).lte('log_date', end);
-    return (data || []) as DailyLog[];
   }
 });
 
@@ -50,7 +42,8 @@ const getFeedLogsOptions = (date: string) => queryOptions({
     const end = new Date(`${date}T23:59:59.999`).toISOString();
     const { data } = await supabase.from('feed_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: true });
     return data || [];
-  }
+  },
+  placeholderData: keepPreviousData 
 });
 
 const getWeightLogsOptions = (date: string) => queryOptions({
@@ -61,7 +54,8 @@ const getWeightLogsOptions = (date: string) => queryOptions({
     const end = new Date(`${date}T23:59:59.999`).toISOString();
     const { data } = await supabase.from('weight_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: false });
     return data || [];
-  }
+  },
+  placeholderData: keepPreviousData
 });
 
 const getTempLogsOptions = (date: string) => queryOptions({
@@ -72,7 +66,8 @@ const getTempLogsOptions = (date: string) => queryOptions({
     const end = new Date(`${date}T23:59:59.999`).toISOString();
     const { data } = await supabase.from('temperature_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: false });
     return data || [];
-  }
+  },
+  placeholderData: keepPreviousData
 });
 
 export const Route = createFileRoute('/husbandry/daily-logs')({
@@ -81,7 +76,6 @@ export const Route = createFileRoute('/husbandry/daily-logs')({
     if (queryClient) {
       await Promise.all([
         queryClient.ensureQueryData(getAnimalsOptions()),
-        queryClient.ensureQueryData(getLegacyLogsOptions(today)),
         queryClient.ensureQueryData(getFeedLogsOptions(today)),
         queryClient.ensureQueryData(getWeightLogsOptions(today)),
         queryClient.ensureQueryData(getTempLogsOptions(today)),
@@ -99,16 +93,17 @@ const SECTION_BAR = [
   { id: 'EXOTIC', label: 'Exotic' }
 ] as const;
 
-type WorksheetRecord = { animal: Animal; legacyLog: DailyLog | undefined; feeds: any[]; weight: any; temp: any; };
+type WorksheetRecord = { animal: Animal; feeds: any[]; weight: any; temp: any; };
 
 const DYNAMIC_GRID_COLS = "lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_minmax(160px,1.5fr)_minmax(320px,3fr)]";
 
 export function DailyLogsPage() {
   const queryClient = useQueryClient();
-  const [selectedDate, setSelectedDate] = useState<string>(getLocalDateString());
+  
+  const [activeDate, setActiveDate] = useState<string>(getLocalDateString());
+  const [inputDate, setInputDate] = useState<string>(getLocalDateString());
   const [activeSection, setActiveSection] = useState<string>('ALL');
 
-  // UPDATE: Modal state now accepts initialData to route to the form defaults
   const [feedModalState, setFeedModalState] = useState<{ isOpen: boolean; animalId: string | null; initialData?: any }>({ isOpen: false, animalId: null });
   const [weightModalState, setWeightModalState] = useState<{ isOpen: boolean; animalId: string | null; initialData?: any }>({ isOpen: false, animalId: null });
   const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null; initialData?: any }>({ isOpen: false, animal: null });
@@ -125,41 +120,66 @@ export function DailyLogsPage() {
   }, [queryClient]);
 
   const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
-  
-  const results = useQueries({
-    queries: [
-      getLegacyLogsOptions(selectedDate),
-      getFeedLogsOptions(selectedDate),
-      getWeightLogsOptions(selectedDate),
-      getTempLogsOptions(selectedDate)
-    ]
-  });
+  const { data: feedLogs = [], isFetching: fetchingFeeds, isError: errFeeds } = useQuery(getFeedLogsOptions(activeDate));
+  const { data: weightLogs = [], isFetching: fetchingWeights, isError: errWeights } = useQuery(getWeightLogsOptions(activeDate));
+  const { data: tempLogs = [], isFetching: fetchingTemps, isError: errTemps } = useQuery(getTempLogsOptions(activeDate));
 
-  const isLoadingLogs = results.some(r => r.isLoading);
-  const isError = results.some(r => r.isError);
-  const [legacyLogs, feedLogs, weightLogs, tempLogs] = results.map(r => r.data || []);
+  const isFetchingLogs = fetchingFeeds || fetchingWeights || fetchingTemps;
+  const isError = errFeeds || errWeights || errTemps;
 
+  // ============================================================================
+  // ARCHITECTURE UPGRADE: Hash Maps for O(1) Data Stitching (Kills the Freeze)
+  // ============================================================================
   const filteredWorksheetRecords = useMemo<WorksheetRecord[]>(() => {
-    const cleanAnimals = animals.filter(a => {
-      if (a.status === 'ARCHIVED') return false;
-      if (activeSection === 'ALL') return true;
-      return a.category === activeSection;
+    // 1. Create Data Dictionaries (Loops logs only ONCE)
+    const feedMap = new Map<string, any[]>();
+    feedLogs.forEach(f => {
+      if (!feedMap.has(f.animal_id)) feedMap.set(f.animal_id, []);
+      feedMap.get(f.animal_id)!.push(f);
     });
 
-    return cleanAnimals.map(animal => ({
-      animal,
-      legacyLog: legacyLogs.find((l: any) => l.animal_id === animal.id),
-      feeds: feedLogs.filter((f: any) => f.animal_id === animal.id),
-      weight: weightLogs.find((w: any) => w.animal_id === animal.id), 
-      temp: tempLogs.find((t: any) => t.animal_id === animal.id), 
-    }));
-  }, [animals, legacyLogs, feedLogs, weightLogs, tempLogs, activeSection]);
+    const weightMap = new Map<string, any>();
+    weightLogs.forEach(w => {
+      if (!weightMap.has(w.animal_id)) weightMap.set(w.animal_id, w);
+    });
+
+    const tempMap = new Map<string, any>();
+    tempLogs.forEach(t => {
+      if (!tempMap.has(t.animal_id)) tempMap.set(t.animal_id, t);
+    });
+
+    // 2. Filter and Map Animals (Loops animals only ONCE, instantly grabbing data from maps)
+    return animals
+      .filter(a => {
+        if (a.status === 'ARCHIVED') return false;
+        if (activeSection === 'ALL') return true;
+        return a.category === activeSection;
+      })
+      .map(animal => ({
+        animal,
+        feeds: feedMap.get(animal.id) || [],
+        weight: weightMap.get(animal.id),
+        temp: tempMap.get(animal.id),
+      }));
+  }, [animals, feedLogs, weightLogs, tempLogs, activeSection]);
+
+  const updateDate = (newDate: string) => {
+    setActiveDate(newDate);
+    setInputDate(newDate);
+  };
 
   const shiftDate = (days: number) => {
-    let baseDate = new Date(selectedDate);
-    if (isNaN(baseDate.getTime())) baseDate = new Date();
-    baseDate.setDate(baseDate.getDate() + days);
-    setSelectedDate(baseDate.toISOString().split('T')[0]);
+    const parts = activeDate.split('-');
+    if (parts.length !== 3) return;
+    const [y, m, d] = parts.map(Number);
+    const dateObj = new Date(y, m - 1, d);
+    dateObj.setDate(dateObj.getDate() + days);
+
+    const newDateString = dateObj.getFullYear() + '-' +
+      String(dateObj.getMonth() + 1).padStart(2, '0') + '-' +
+      String(dateObj.getDate()).padStart(2, '0');
+
+    updateDate(newDateString);
   };
 
   const columns = useMemo<ColumnDef<WorksheetRecord>[]>(() => [
@@ -176,18 +196,16 @@ export function DailyLogsPage() {
     {
       id: 'weight',
       header: 'Weight',
-      cell: ({ row: { original: { animal, weight, legacyLog } } }) => {
-        const displayGrams = weight?.weight_grams || legacyLog?.weight_grams;
-        const isExempt = legacyLog?.weight_not_required;
+      cell: ({ row: { original: { animal, weight } } }) => {
+        const displayGrams = weight?.weight_grams;
 
         return (
           <button 
             type="button" 
-            // UPDATE: Pass existing log data into the modal state on click
-            onClick={() => setWeightModalState({ isOpen: true, animalId: animal.id, initialData: weight || legacyLog })} 
-            className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${isExempt ? 'bg-slate-100 border-slate-200 text-slate-400' : displayGrams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm border-solid cursor-pointer hover:bg-emerald-100/50' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 cursor-pointer'}`}
+            onClick={() => setWeightModalState({ isOpen: true, animalId: animal.id, initialData: weight })} 
+            className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${displayGrams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm border-solid cursor-pointer hover:bg-emerald-100/50' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 cursor-pointer'}`}
           >
-            {isExempt ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : displayGrams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(displayGrams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
+            {displayGrams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(displayGrams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
           </button>
         );
       }
@@ -195,10 +213,10 @@ export function DailyLogsPage() {
     {
       id: 'temperature',
       header: 'Temperature',
-      cell: ({ row: { original: { animal, temp, legacyLog } } }) => {
-        const displayBasking = temp?.temp_basking ?? legacyLog?.basking_temp_c;
-        const displayCool = temp?.temp_cool ?? legacyLog?.cool_temp_c;
-        const displayAmbient = temp?.temp_ambient ?? legacyLog?.temperature_c;
+      cell: ({ row: { original: { animal, temp } } }) => {
+        const displayBasking = temp?.temp_basking;
+        const displayCool = temp?.temp_cool;
+        const displayAmbient = temp?.temp_ambient;
 
         const hasGradient = displayBasking != null && displayCool != null;
         const hasAmbient = displayAmbient != null;
@@ -207,12 +225,10 @@ export function DailyLogsPage() {
         return (
           <button 
             type="button" 
-            // UPDATE: Pass existing log data
-            onClick={() => setTempModalState({ isOpen: true, animal: animal, initialData: temp || legacyLog })} 
+            onClick={() => setTempModalState({ isOpen: true, animal: animal, initialData: temp })} 
             className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${isLogged ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm border-solid cursor-pointer hover:bg-blue-100/50' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center cursor-pointer'}`}
           >
             {hasGradient ? (
-              // UPDATE: Render Basking/Cool properly
               <div className="w-full flex justify-center items-center gap-1.5 font-black text-[10px] tracking-tight">
                 <span className="text-red-500">{displayBasking}°C</span>
                 <span className="text-slate-400 font-medium">/</span>
@@ -230,27 +246,12 @@ export function DailyLogsPage() {
     {
       id: 'feeding',
       header: 'Feed',
-      cell: ({ row: { original: { animal, feeds, legacyLog } } }) => {
-        let displayFeeds = feeds;
-        if (displayFeeds.length === 0 && legacyLog?.feed_details) {
-            try { 
-              const legacyParsed = typeof legacyLog.feed_details === 'string' ? JSON.parse(legacyLog.feed_details) : legacyLog.feed_details;
-              displayFeeds = (legacyParsed?.meals || []).map((m: any) => ({
-                id: legacyLog.id, // Pass legacy ID to trigger migration upsert
-                food_item: m.food_item || 'Diet Apportion',
-                quantity: m.quantity_consumed || m.food_consumed_g || m.quantity_offered,
-                unit: 'grams', 
-                recorded_at: m.time || legacyLog.log_date
-              }));
-            } catch { /* ignore */ }
-        }
-
+      cell: ({ row: { original: { animal, feeds } } }) => {
         return (
           <div className="flex flex-col gap-2 w-full">
-            {displayFeeds.map((meal: any, idx: number) => (
+            {feeds.map((meal: any, idx: number) => (
               <div 
-                key={idx} 
-                // UPDATE: Add onClick to the feed cards to open modal in edit mode
+                key={meal.id || idx} 
                 onClick={() => setFeedModalState({ isOpen: true, animalId: animal.id, initialData: meal })}
                 className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl text-[10px] flex flex-col gap-1 lg:gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/80 transition-colors"
               >
@@ -259,7 +260,8 @@ export function DailyLogsPage() {
                   <span className="text-amber-700 font-bold">{new Date(meal.recorded_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
                 </div>
                 <div className="text-slate-500 font-bold tracking-tight">
-                  {meal.quantity}{meal.unit === 'grams' || meal.unit === 'g' ? 'g' : ' items'} {meal.feed_method ? `(${meal.feed_method})` : ''}
+                  {meal.quantity}{meal.unit === 'grams' || meal.unit === 'g' ? 'g' : ' items'} 
+                  {meal.feed_method ? ` (${meal.feed_method})` : ''}
                 </div>
               </div>
             ))}
@@ -285,19 +287,21 @@ export function DailyLogsPage() {
     count: rows.length,
     estimateSize: () => (typeof window !== 'undefined' && window.innerWidth >= 1024) ? 80 : 190,
     overscan: 5,
-    scrollMargin: parentRef.current?.offsetTop ?? 0,
   });
 
-  if (loadingAnimals || isLoadingLogs) return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
+  if (loadingAnimals) return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
   if (isError) return <div className="p-8 text-red-500 flex flex-col items-center gap-2"><AlertCircle /><p className="font-bold">Failed to load telemetry data.</p></div>;
 
   return (
     <div className="flex flex-col h-full bg-slate-50/50 overflow-hidden" ref={parentRef}>
-      <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 z-10">
+      <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 z-10 shadow-sm">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-          <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight">Daily Logs</h1>
-            <p className="text-sm font-bold text-slate-500 mt-1">Daily operations and telemetry tracking</p>
+          <div className="flex items-center gap-3">
+            <div>
+              <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Worksheet</h1>
+              <p className="text-sm font-bold text-slate-500 mt-1">Daily operations and telemetry tracking</p>
+            </div>
+            {isFetchingLogs && <Loader2 className="animate-spin text-emerald-500 ml-2" size={24} />}
           </div>
           
           <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl w-full lg:w-auto overflow-x-auto hide-scrollbar">
@@ -319,15 +323,21 @@ export function DailyLogsPage() {
           <button onClick={() => shiftDate(-1)} className="p-2 lg:p-1.5 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-500 transition-colors">
             <ChevronLeft size={20} />
           </button>
+          
           <input
             type="date"
-            value={selectedDate}
-            onChange={(e) => {
-              const val = e.target.value;
-              setSelectedDate(val || getLocalDateString());
+            value={inputDate}
+            onChange={(e) => setInputDate(e.target.value)}
+            onBlur={() => {
+              if (inputDate && !isNaN(new Date(inputDate).getTime())) {
+                setActiveDate(inputDate);
+              } else {
+                setInputDate(activeDate);
+              }
             }}
             className="flex-1 lg:flex-none max-w-[200px] px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500 outline-none text-center"
           />
+          
           <button onClick={() => shiftDate(1)} className="p-2 lg:p-1.5 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-500 transition-colors">
             <ChevronRight size={20} />
           </button>
@@ -357,7 +367,7 @@ export function DailyLogsPage() {
                     top: 0,
                     left: 0,
                     width: '100%',
-                    transform: `translateY(${virtualRow.start - (parentRef.current?.offsetTop ?? 0)}px)`,
+                    transform: `translateY(${virtualRow.start}px)`,
                   }}
                   className="w-full"
                 >
