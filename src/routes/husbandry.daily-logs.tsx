@@ -1,30 +1,15 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
-import { useQuery, queryOptions, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueries, queryOptions, useQueryClient } from '@tanstack/react-query';
 import { useWindowVirtualizer } from '@tanstack/react-virtual';
-import { 
-  useReactTable, 
-  getCoreRowModel, 
-  flexRender, 
-  ColumnDef 
-} from '@tanstack/react-table';
+import { useReactTable, getCoreRowModel, flexRender, ColumnDef } from '@tanstack/react-table';
 import { Scale, Thermometer, ChevronLeft, ChevronRight, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Animal, DailyLog } from '../types';
 
-// DECOUPLED MODAL IMPORTS
 import { FeedModal } from '../components/husbandry/FeedModal';
 import { WeightModal } from '../components/husbandry/WeightModal';
 import { TemperatureModal } from '../components/husbandry/TemperatureModal';
-
-export const generateOfflineUUID = () => {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    const v = c === 'x' ? r : (r & 0x3) | 0x8;
-    return v.toString(16);
-  });
-};
 
 const getLocalDateString = () => {
   const d = new Date();
@@ -34,24 +19,6 @@ const getLocalDateString = () => {
 export const formatWeightDisplay = (grams: number | null | undefined, unit: string) => {
   if (!grams) return null;
   if (unit === 'kg') return `${(grams / 1000).toFixed(2)}kg`;
-  if (unit === 'lb') {
-    const totalOunces = grams / 28.3495;
-    let lbs = Math.floor(totalOunces / 16);
-    let oz = Math.floor(totalOunces - (lbs * 16));
-    let eighths = Math.round((totalOunces - (lbs * 16) - oz) * 8);
-    if (eighths >= 8) { oz += 1; eighths = 0; }
-    if (oz >= 16) { lbs += 1; oz = 0; }
-    const eighthsStr = eighths > 0 ? ` ${eighths}/8` : '';
-    return `${lbs}lb ${oz}${eighthsStr}oz`;
-  }
-  if (unit === 'oz') {
-    const totalOunces = grams / 28.3495;
-    let oz = Math.floor(totalOunces);
-    let eighths = Math.round((totalOunces - oz) * 8);
-    if (eighths >= 8) { oz += 1; eighths = 0; }
-    const eighthsStr = eighths > 0 ? ` ${eighths}/8` : '';
-    return `${oz}${eighthsStr}oz`;
-  }
   return `${Math.round(grams)}g`;
 };
 
@@ -61,39 +28,64 @@ const getAnimalsOptions = () => queryOptions({
     const { data, error } = await supabase.from('animals').select('*').order('name');
     if (error) throw error;
     return data as Animal[];
-  },
-  staleTime: 1000 * 60 * 5,
-  gcTime: 1000 * 60 * 60 * 24 * 14,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
+  }
 });
 
-const getDailyLogsOptions = (date: string) => queryOptions({
-  queryKey: ['daily_logs', 'date-view', date],
+const getLegacyLogsOptions = (date: string) => queryOptions({
+  queryKey: ['daily_logs', date],
   queryFn: async () => {
-    const startOfDay = new Date(`${date}T00:00:00`);
-    const endOfDay = new Date(`${date}T23:59:59.999`);
-    const { data, error } = await supabase
-      .from('daily_logs')
-      .select('*')
-      .eq('is_deleted', false)
-      .gte('log_date', startOfDay.toISOString())
-      .lte('log_date', endOfDay.toISOString());
-    if (error) throw error;
-    return data as DailyLog[];
-  },
-  staleTime: 1000 * 60 * 5,
-  gcTime: 1000 * 60 * 60 * 24 * 14,
-  networkMode: 'offlineFirst',
-  meta: { persist: true }
+    if (!date) return [];
+    const start = new Date(`${date}T00:00:00`).toISOString();
+    const end = new Date(`${date}T23:59:59.999`).toISOString();
+    const { data } = await supabase.from('daily_logs').select('*').eq('is_deleted', false).gte('log_date', start).lte('log_date', end);
+    return (data || []) as DailyLog[];
+  }
+});
+
+const getFeedLogsOptions = (date: string) => queryOptions({
+  queryKey: ['feeds', date],
+  queryFn: async () => {
+    if (!date) return [];
+    const start = new Date(`${date}T00:00:00`).toISOString();
+    const end = new Date(`${date}T23:59:59.999`).toISOString();
+    const { data } = await supabase.from('feed_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: true });
+    return data || [];
+  }
+});
+
+const getWeightLogsOptions = (date: string) => queryOptions({
+  queryKey: ['weights', date],
+  queryFn: async () => {
+    if (!date) return [];
+    const start = new Date(`${date}T00:00:00`).toISOString();
+    const end = new Date(`${date}T23:59:59.999`).toISOString();
+    const { data } = await supabase.from('weight_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: false });
+    return data || [];
+  }
+});
+
+const getTempLogsOptions = (date: string) => queryOptions({
+  queryKey: ['temperatures', date],
+  queryFn: async () => {
+    if (!date) return [];
+    const start = new Date(`${date}T00:00:00`).toISOString();
+    const end = new Date(`${date}T23:59:59.999`).toISOString();
+    const { data } = await supabase.from('temperature_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: false });
+    return data || [];
+  }
 });
 
 export const Route = createFileRoute('/husbandry/daily-logs')({
   loader: async ({ context: { queryClient } }) => {
     const today = getLocalDateString();
     if (queryClient) {
-      await queryClient.ensureQueryData(getAnimalsOptions());
-      await queryClient.ensureQueryData(getDailyLogsOptions(today));
+      await Promise.all([
+        queryClient.ensureQueryData(getAnimalsOptions()),
+        queryClient.ensureQueryData(getLegacyLogsOptions(today)),
+        queryClient.ensureQueryData(getFeedLogsOptions(today)),
+        queryClient.ensureQueryData(getWeightLogsOptions(today)),
+        queryClient.ensureQueryData(getTempLogsOptions(today)),
+      ]);
     }
   },
   component: DailyLogsPage,
@@ -107,33 +99,45 @@ const SECTION_BAR = [
   { id: 'EXOTIC', label: 'Exotic' }
 ] as const;
 
-type WorksheetRecord = { animal: Animal; log: DailyLog | undefined };
+type WorksheetRecord = { animal: Animal; legacyLog: DailyLog | undefined; feeds: any[]; weight: any; temp: any; };
 
-const DYNAMIC_GRID_COLS = "lg:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(280px,2.5fr)_minmax(250px,2fr)]";
+const DYNAMIC_GRID_COLS = "lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_minmax(160px,1.5fr)_minmax(320px,3fr)]";
 
 export function DailyLogsPage() {
   const queryClient = useQueryClient();
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDateString());
   const [activeSection, setActiveSection] = useState<string>('ALL');
 
-  // TARGETED MODAL STATE CONTROLLERS
-  const [feedModalState, setFeedModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
-  const [weightModalState, setWeightModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
-  const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null }>({ isOpen: false, animal: null });
+  // UPDATE: Modal state now accepts initialData to route to the form defaults
+  const [feedModalState, setFeedModalState] = useState<{ isOpen: boolean; animalId: string | null; initialData?: any }>({ isOpen: false, animalId: null });
+  const [weightModalState, setWeightModalState] = useState<{ isOpen: boolean; animalId: string | null; initialData?: any }>({ isOpen: false, animalId: null });
+  const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null; initialData?: any }>({ isOpen: false, animal: null });
 
   const parentRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const channel = supabase
-      .channel('schema-db-changes')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'daily_logs' }, () => {
-        queryClient.invalidateQueries({ queryKey: ['daily_logs'] });
-      }).subscribe();
+    const channel = supabase.channel('telemetry-changes')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'feed_logs' }, () => queryClient.invalidateQueries({ queryKey: ['feeds'] }))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'weight_logs' }, () => queryClient.invalidateQueries({ queryKey: ['weights'] }))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'temperature_logs' }, () => queryClient.invalidateQueries({ queryKey: ['temperatures'] }))
+      .subscribe();
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
   const { data: animals = [], isLoading: loadingAnimals } = useQuery(getAnimalsOptions());
-  const { data: todaysLogs = [], isLoading: loadingLogs, error: logsError } = useQuery(getDailyLogsOptions(selectedDate));
+  
+  const results = useQueries({
+    queries: [
+      getLegacyLogsOptions(selectedDate),
+      getFeedLogsOptions(selectedDate),
+      getWeightLogsOptions(selectedDate),
+      getTempLogsOptions(selectedDate)
+    ]
+  });
+
+  const isLoadingLogs = results.some(r => r.isLoading);
+  const isError = results.some(r => r.isError);
+  const [legacyLogs, feedLogs, weightLogs, tempLogs] = results.map(r => r.data || []);
 
   const filteredWorksheetRecords = useMemo<WorksheetRecord[]>(() => {
     const cleanAnimals = animals.filter(a => {
@@ -141,15 +145,21 @@ export function DailyLogsPage() {
       if (activeSection === 'ALL') return true;
       return a.category === activeSection;
     });
-    const logMap = new Map<string, DailyLog>();
-    todaysLogs.forEach(log => { logMap.set(log.animal_id, log); });
-    return cleanAnimals.map(animal => ({ animal, log: logMap.get(animal.id) }));
-  }, [animals, todaysLogs, activeSection]);
+
+    return cleanAnimals.map(animal => ({
+      animal,
+      legacyLog: legacyLogs.find((l: any) => l.animal_id === animal.id),
+      feeds: feedLogs.filter((f: any) => f.animal_id === animal.id),
+      weight: weightLogs.find((w: any) => w.animal_id === animal.id), 
+      temp: tempLogs.find((t: any) => t.animal_id === animal.id), 
+    }));
+  }, [animals, legacyLogs, feedLogs, weightLogs, tempLogs, activeSection]);
 
   const shiftDate = (days: number) => {
-    const current = new Date(selectedDate);
-    current.setDate(current.getDate() + days);
-    setSelectedDate(current.toISOString().split('T')[0]);
+    let baseDate = new Date(selectedDate);
+    if (isNaN(baseDate.getTime())) baseDate = new Date();
+    baseDate.setDate(baseDate.getDate() + days);
+    setSelectedDate(baseDate.toISOString().split('T')[0]);
   };
 
   const columns = useMemo<ColumnDef<WorksheetRecord>[]>(() => [
@@ -158,7 +168,7 @@ export function DailyLogsPage() {
       header: 'Name',
       cell: ({ row }) => (
         <div className="flex flex-col pt-2">
-          <span className="font-black text-slate-900 text-lg lg:text-sm leading-tight">{row.original.animal.name}</span>
+          <span className="font-black text-slate-900 text-lg lg:text-base leading-tight">{row.original.animal.name}</span>
           <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">{row.original.animal.species}</span>
         </div>
       )
@@ -166,49 +176,98 @@ export function DailyLogsPage() {
     {
       id: 'weight',
       header: 'Weight',
-      cell: ({ row: { original: { animal, log } } }) => (
-        <button 
-          type="button" 
-          onClick={() => setWeightModalState({ isOpen: true, animalId: animal.id })} 
-          className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'}`}
-        >
-          {log?.weight_not_required ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : log?.weight_grams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(log.weight_grams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
-        </button>
-      )
+      cell: ({ row: { original: { animal, weight, legacyLog } } }) => {
+        const displayGrams = weight?.weight_grams || legacyLog?.weight_grams;
+        const isExempt = legacyLog?.weight_not_required;
+
+        return (
+          <button 
+            type="button" 
+            // UPDATE: Pass existing log data into the modal state on click
+            onClick={() => setWeightModalState({ isOpen: true, animalId: animal.id, initialData: weight || legacyLog })} 
+            className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${isExempt ? 'bg-slate-100 border-slate-200 text-slate-400' : displayGrams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm border-solid cursor-pointer hover:bg-emerald-100/50' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 cursor-pointer'}`}
+          >
+            {isExempt ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : displayGrams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(displayGrams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
+          </button>
+        );
+      }
     },
     {
       id: 'temperature',
       header: 'Temperature',
-      cell: ({ row: { original: { animal, log } } }) => (
-        <button 
-          type="button" 
-          onClick={() => setTempModalState({ isOpen: true, animal: animal })} 
-          className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center'}`}
-        >
-          {log?.temperature_c ? <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight text-center">{log.temperature_c}°C</div> : <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>}
-        </button>
-      )
+      cell: ({ row: { original: { animal, temp, legacyLog } } }) => {
+        const displayBasking = temp?.temp_basking ?? legacyLog?.basking_temp_c;
+        const displayCool = temp?.temp_cool ?? legacyLog?.cool_temp_c;
+        const displayAmbient = temp?.temp_ambient ?? legacyLog?.temperature_c;
+
+        const hasGradient = displayBasking != null && displayCool != null;
+        const hasAmbient = displayAmbient != null;
+        const isLogged = hasGradient || hasAmbient;
+        
+        return (
+          <button 
+            type="button" 
+            // UPDATE: Pass existing log data
+            onClick={() => setTempModalState({ isOpen: true, animal: animal, initialData: temp || legacyLog })} 
+            className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${isLogged ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm border-solid cursor-pointer hover:bg-blue-100/50' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center cursor-pointer'}`}
+          >
+            {hasGradient ? (
+              // UPDATE: Render Basking/Cool properly
+              <div className="w-full flex justify-center items-center gap-1.5 font-black text-[10px] tracking-tight">
+                <span className="text-red-500">{displayBasking}°C</span>
+                <span className="text-slate-400 font-medium">/</span>
+                <span className="text-blue-500">{displayCool}°C</span>
+              </div>
+            ) : hasAmbient ? (
+              <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight text-center">{displayAmbient}°C</div>
+            ) : (
+              <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>
+            )}
+          </button>
+        );
+      }
     },
     {
       id: 'feeding',
       header: 'Feed',
-      cell: ({ row: { original: { animal, log } } }) => {
-        // Keeping legacy JSON parser intact for historical rows until complete migration
-        const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
-        const meals = feedParsed?.meals || [];
+      cell: ({ row: { original: { animal, feeds, legacyLog } } }) => {
+        let displayFeeds = feeds;
+        if (displayFeeds.length === 0 && legacyLog?.feed_details) {
+            try { 
+              const legacyParsed = typeof legacyLog.feed_details === 'string' ? JSON.parse(legacyLog.feed_details) : legacyLog.feed_details;
+              displayFeeds = (legacyParsed?.meals || []).map((m: any) => ({
+                id: legacyLog.id, // Pass legacy ID to trigger migration upsert
+                food_item: m.food_item || 'Diet Apportion',
+                quantity: m.quantity_consumed || m.food_consumed_g || m.quantity_offered,
+                unit: 'grams', 
+                recorded_at: m.time || legacyLog.log_date
+              }));
+            } catch { /* ignore */ }
+        }
+
         return (
           <div className="flex flex-col gap-2 w-full">
-            {meals.map((meal: any, idx: number) => (
-              <div key={idx} className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl text-[10px] flex flex-col gap-1 lg:gap-0.5 shadow-sm">
-                <div className="flex justify-between font-black text-slate-800 tracking-tight"><span>{meal.food_item || 'Diet Apportion'}</span><span className="text-amber-700 font-bold">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>
-                <div className="text-slate-500 font-bold tracking-tight">Offered: {meal.quantity_offered || meal.food_offered_g}g | Consumed: <span className="text-emerald-600 font-black">{meal.quantity_consumed || meal.food_consumed_g}g</span></div>
+            {displayFeeds.map((meal: any, idx: number) => (
+              <div 
+                key={idx} 
+                // UPDATE: Add onClick to the feed cards to open modal in edit mode
+                onClick={() => setFeedModalState({ isOpen: true, animalId: animal.id, initialData: meal })}
+                className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl text-[10px] flex flex-col gap-1 lg:gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/80 transition-colors"
+              >
+                <div className="flex justify-between font-black text-slate-800 tracking-tight">
+                  <span>{meal.food_item}</span>
+                  <span className="text-amber-700 font-bold">{new Date(meal.recorded_at).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span>
+                </div>
+                <div className="text-slate-500 font-bold tracking-tight">
+                  {meal.quantity}{meal.unit === 'grams' || meal.unit === 'g' ? 'g' : ' items'} {meal.feed_method ? `(${meal.feed_method})` : ''}
+                </div>
               </div>
             ))}
             
             <button 
               type="button" 
               onClick={() => setFeedModalState({ isOpen: true, animalId: animal.id })} 
-              className="w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 text-center flex flex-col justify-center items-center transition-all shadow-sm"
+              className="w-full lg:w-[140px] min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 text-center flex flex-col justify-center items-center transition-all shadow-sm cursor-pointer"
             >
               <Plus size={14} className="opacity-40 mb-1" />
               <span className="text-[9px] font-black uppercase tracking-widest">Add Feed</span>
@@ -216,45 +275,25 @@ export function DailyLogsPage() {
           </div>
         );
       }
-    },
-    {
-      id: 'observations',
-      header: 'Daily Descriptive Observations',
-      cell: ({ row: { original: { animal, log } } }) => (
-        // Leaving Observation routing untouched for now
-        <button type="button" className="w-full text-left hover:bg-slate-100/50 p-3 lg:p-2 rounded-xl border border-slate-100 lg:border-transparent transition-colors min-h-[60px] lg:min-h-[44px] flex items-start">
-          <span className="text-xs lg:text-[11px] leading-relaxed block whitespace-pre-wrap">{log?.notes || <span className="text-slate-400 italic">No notes entered for this date...</span>}</span>
-        </button>
-      )
     }
   ], []);
 
-  const table = useReactTable({
-    data: filteredWorksheetRecords,
-    columns,
-    getCoreRowModel: getCoreRowModel(),
-  });
-
+  const table = useReactTable({ data: filteredWorksheetRecords, columns, getCoreRowModel: getCoreRowModel() });
   const { rows } = table.getRowModel();
+  
   const rowVirtualizer = useWindowVirtualizer({
     count: rows.length,
-    estimateSize: () => 85,
+    estimateSize: () => (typeof window !== 'undefined' && window.innerWidth >= 1024) ? 80 : 190,
     overscan: 5,
     scrollMargin: parentRef.current?.offsetTop ?? 0,
   });
 
-  if (loadingAnimals || loadingLogs) {
-    return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
-  }
-
-  if (logsError) {
-    return <div className="p-8 text-red-500 flex flex-col items-center gap-2"><AlertCircle /><p className="font-bold">Failed to load logs.</p></div>;
-  }
+  if (loadingAnimals || isLoadingLogs) return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
+  if (isError) return <div className="p-8 text-red-500 flex flex-col items-center gap-2"><AlertCircle /><p className="font-bold">Failed to load telemetry data.</p></div>;
 
   return (
     <div className="flex flex-col h-full bg-slate-50/50 overflow-hidden" ref={parentRef}>
-      {/* Header & Date Picker */}
-      <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 shadow-sm z-10">
+      <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 z-10">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
             <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Worksheet</h1>
@@ -267,9 +306,7 @@ export function DailyLogsPage() {
                 key={section.id}
                 onClick={() => setActiveSection(section.id)}
                 className={`flex-1 lg:flex-none px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${
-                  activeSection === section.id 
-                    ? 'bg-white text-emerald-700 shadow-sm border border-emerald-100/50' 
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
+                  activeSection === section.id ? 'bg-white text-emerald-700 shadow-sm border border-emerald-100/50' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
                 }`}
               >
                 {section.label}
@@ -285,7 +322,10 @@ export function DailyLogsPage() {
           <input
             type="date"
             value={selectedDate}
-            onChange={(e) => setSelectedDate(e.target.value)}
+            onChange={(e) => {
+              const val = e.target.value;
+              setSelectedDate(val || getLocalDateString());
+            }}
             className="flex-1 lg:flex-none max-w-[200px] px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500 outline-none text-center"
           />
           <button onClick={() => shiftDate(1)} className="p-2 lg:p-1.5 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-500 transition-colors">
@@ -294,10 +334,9 @@ export function DailyLogsPage() {
         </div>
       </div>
 
-      {/* Worksheet Body */}
-      <div className="flex-1 overflow-x-auto">
-        <div className="min-w-[1000px] w-full p-4 lg:p-6">
-          <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 mb-4 px-4`}>
+      <div className="flex-1 overflow-x-auto bg-white">
+        <div className="min-w-[1000px] w-full px-4 py-4 lg:px-8 lg:py-6">
+          <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-6 mb-3 px-6`}>
             {table.getHeaderGroups()[0].headers.map(header => (
               <div key={header.id} className="text-[10px] font-black uppercase tracking-widest text-slate-400">
                 {flexRender(header.column.columnDef.header, header.getContext())}
@@ -311,17 +350,18 @@ export function DailyLogsPage() {
               return (
                 <div
                   key={row.id}
+                  data-index={virtualRow.index}
+                  ref={rowVirtualizer.measureElement}
                   style={{
                     position: 'absolute',
                     top: 0,
                     left: 0,
                     width: '100%',
-                    height: `${virtualRow.size}px`,
-                    transform: `translateY(${virtualRow.start}px)`,
+                    transform: `translateY(${virtualRow.start - (parentRef.current?.offsetTop ?? 0)}px)`,
                   }}
-                  className="pb-3"
+                  className="w-full"
                 >
-                  <div className="bg-white border border-slate-200 rounded-2xl p-4 lg:p-2 lg:px-4 shadow-sm hover:border-slate-300 hover:shadow-md transition-all flex flex-col lg:grid lg:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(280px,2.5fr)_minmax(250px,2fr)] gap-4 lg:items-center">
+                  <div className="bg-white border-b border-slate-100 p-4 lg:py-4 lg:px-6 hover:bg-slate-50/50 transition-colors flex flex-col lg:grid lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_minmax(160px,1.5fr)_minmax(320px,3fr)] gap-6 lg:items-center">
                     {row.getVisibleCells().map(cell => (
                       <div key={cell.id} className="w-full">
                         <div className="lg:hidden text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
@@ -338,30 +378,14 @@ export function DailyLogsPage() {
         </div>
       </div>
 
-      {/* THE NEW DECOUPLED MODALS */}
       {feedModalState.isOpen && feedModalState.animalId && (
-        <FeedModal
-          isOpen={feedModalState.isOpen}
-          animalId={feedModalState.animalId}
-          onClose={() => setFeedModalState({ isOpen: false, animalId: null })}
-        />
+        <FeedModal isOpen={feedModalState.isOpen} animalId={feedModalState.animalId} initialData={feedModalState.initialData} onClose={() => setFeedModalState({ isOpen: false, animalId: null, initialData: undefined })} />
       )}
-
       {weightModalState.isOpen && weightModalState.animalId && (
-        <WeightModal
-          isOpen={weightModalState.isOpen}
-          animalId={weightModalState.animalId}
-          onClose={() => setWeightModalState({ isOpen: false, animalId: null })}
-        />
+        <WeightModal isOpen={weightModalState.isOpen} animalId={weightModalState.animalId} initialData={weightModalState.initialData} onClose={() => setWeightModalState({ isOpen: false, animalId: null, initialData: undefined })} />
       )}
-
       {tempModalState.isOpen && tempModalState.animal && (
-        <TemperatureModal
-          isOpen={tempModalState.isOpen}
-          animalId={tempModalState.animal.id}
-          ambientOnly={tempModalState.animal.ambient_temp_only || false} 
-          onClose={() => setTempModalState({ isOpen: false, animal: null })}
-        />
+        <TemperatureModal isOpen={tempModalState.isOpen} animalId={tempModalState.animal.id} ambientOnly={tempModalState.animal.ambient_temp_only || false} initialData={tempModalState.initialData} onClose={() => setTempModalState({ isOpen: false, animal: null, initialData: undefined })} />
       )}
     </div>
   );
