@@ -7,17 +7,20 @@ import {
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 
-// Local enum to prevent import path errors
 export enum AnimalCategory {
-  OWLS = 'OWLS',
-  RAPTORS = 'RAPTORS',
-  MAMMALS = 'MAMMALS',
-  EXOTICS = 'EXOTICS'
+  OWL = 'OWL',
+  RAPTOR = 'RAPTOR',
+  MAMMAL = 'MAMMAL',
+  EXOTIC = 'EXOTIC'
 }
 
-// ------------------------------------------------------------------
-// STRICT OFFLINE QUERY OPTIONS
-// ------------------------------------------------------------------
+const CATEGORY_LABELS: Record<AnimalCategory, string> = {
+  [AnimalCategory.OWL]: 'Owls',
+  [AnimalCategory.RAPTOR]: 'Raptors',
+  [AnimalCategory.MAMMAL]: 'Mammals',
+  [AnimalCategory.EXOTIC]: 'Exotics'
+};
+
 const operationalListsOptions = queryOptions({
   queryKey: ['operational_lists'],
   queryFn: async () => {
@@ -35,9 +38,6 @@ const operationalListsOptions = queryOptions({
   meta: { persist: true }
 });
 
-// ------------------------------------------------------------------
-// ROUTE CONNECTION (This was missing and caused your error!)
-// ------------------------------------------------------------------
 export const Route = createFileRoute('/settings/lists')({
   loader: async ({ context: { queryClient } }) => {
     // @ts-ignore
@@ -48,14 +48,11 @@ export const Route = createFileRoute('/settings/lists')({
 
 export function OperationalListsPage() {
   const queryClient = useQueryClient();
-  const [listSection, setListSection] = useState<AnimalCategory>(AnimalCategory.OWLS);
+  const [listSection, setListSection] = useState<AnimalCategory>(AnimalCategory.OWL);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState('');
   const [newValue, setNewValue] = useState<{ [key: string]: string }>({});
 
-  // ------------------------------------------------------------------
-  // SUPABASE REALTIME CACHE INVALIDATION
-  // ------------------------------------------------------------------
   useEffect(() => {
     const channel = supabase.channel('lists-db-changes')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'operational_lists' }, () => {
@@ -66,19 +63,24 @@ export function OperationalListsPage() {
 
   const { data: allLists = [], isLoading } = useQuery(operationalListsOptions);
 
-  // Derive isolated arrays locally
   const { foodTypes, feedMethods, eventTypes, locations } = useMemo(() => {
+    const currentTab = listSection.toUpperCase();
+    
     return {
-      foodTypes: allLists.filter((i: any) => i.category === 'food_type' && i.description === listSection),
-      feedMethods: allLists.filter((i: any) => i.category === 'feed_method' && i.description === listSection),
-      eventTypes: allLists.filter((i: any) => i.category === 'event'),
-      locations: allLists.filter((i: any) => i.category === 'location'),
+      // UPDATED: Now queries the new animal_category column
+      foodTypes: allLists.filter((i: any) => 
+        i.category?.toLowerCase() === 'food_type' && 
+        i.animal_category?.toUpperCase().includes(currentTab)
+      ),
+      feedMethods: allLists.filter((i: any) => 
+        i.category?.toLowerCase() === 'feed_method' && 
+        i.animal_category?.toUpperCase().includes(currentTab)
+      ),
+      eventTypes: allLists.filter((i: any) => i.category?.toLowerCase() === 'event'),
+      locations: allLists.filter((i: any) => i.category?.toLowerCase() === 'location'),
     };
   }, [allLists, listSection]);
 
-  // ------------------------------------------------------------------
-  // OFFLINE-FIRST MUTATIONS
-  // ------------------------------------------------------------------
   const addMutation = useMutation({
     mutationFn: async (payload: any) => {
       const { error } = await supabase.from('operational_lists').insert([payload]);
@@ -115,7 +117,8 @@ export function OperationalListsPage() {
       id: crypto.randomUUID(),
       category: type,
       name: val.trim(),
-      description: category || null,
+      // UPDATED: Pushes specifically to the new animal_category column
+      animal_category: category || null, 
       is_deleted: false
     });
 
@@ -173,8 +176,8 @@ export function OperationalListsPage() {
           </div>
         ) : (
           <div className="divide-y divide-slate-100">
-            {items.map((item) => (
-              <div key={item.id} className="p-3 flex items-center justify-between group hover:bg-slate-50 transition-colors">
+            {items.map((item, idx) => (
+              <div key={item.id ? `${item.id}-${idx}` : `fallback-key-${idx}`} className="p-3 flex items-center justify-between group hover:bg-slate-50 transition-colors">
                 {editingId === item.id ? (
                   <div className="flex items-center gap-2 w-full">
                     <input
@@ -190,7 +193,6 @@ export function OperationalListsPage() {
                   </div>
                 ) : (
                   <>
-                    {/* Database column is "name" not "value" */}
                     <span className="text-sm text-slate-700 font-medium">{item.name}</span>
                     <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                       <button
@@ -227,7 +229,7 @@ export function OperationalListsPage() {
         </div>
         
         <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 overflow-x-auto">
-          {[AnimalCategory.OWLS, AnimalCategory.RAPTORS, AnimalCategory.MAMMALS, AnimalCategory.EXOTICS].map((cat) => (
+          {[AnimalCategory.OWL, AnimalCategory.RAPTOR, AnimalCategory.MAMMAL, AnimalCategory.EXOTIC].map((cat) => (
             <button
               key={cat}
               onClick={() => setListSection(cat)}
@@ -237,7 +239,7 @@ export function OperationalListsPage() {
                   : 'text-slate-500 hover:text-slate-700'
               }`}
             >
-              {cat}
+              {CATEGORY_LABELS[cat]}
             </button>
           ))}
         </div>
@@ -260,7 +262,7 @@ export function OperationalListsPage() {
         <div>
           <h4 className="text-sm font-bold text-amber-900">Pro Tip: Data Consistency</h4>
           <p className="text-xs text-amber-700 mt-1">
-            Food types and feed methods are scoped to the selected animal category (e.g. {listSection}). 
+            Food types and feed methods are scoped to the selected animal category (e.g. {CATEGORY_LABELS[listSection]}). 
             Event types and locations are global and available across all categories.
           </p>
         </div>

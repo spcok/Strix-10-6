@@ -296,7 +296,7 @@ export function DailyLogsPage() {
       <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 z-10">
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           <div>
-            <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Worksheet</h1>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight">Daily Logs</h1>
             <p className="text-sm font-bold text-slate-500 mt-1">Daily operations and telemetry tracking</p>
           </div>
           

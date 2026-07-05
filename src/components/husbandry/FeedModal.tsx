@@ -60,56 +60,52 @@ export function FeedModal({ isOpen, onClose, animalId, initialData }: FeedModalP
   const queryClient = useQueryClient();
   const { profile } = useAuth();
 
-  // 1. Fetch the exact Animal profile from the local cache
   const animal = useMemo(() => {
     const cachedAnimals = queryClient.getQueryData<Animal[]>(['animals', 'dashboard']) || [];
     return cachedAnimals.find(a => a.id === animalId);
   }, [queryClient, animalId]);
 
-  // THE FIX: We specifically target the animal's DESCRIPTION field, normalized to uppercase
-  const animalFilterKey = animal?.description?.toUpperCase().trim() || '';
+  // Extract exactly the animal's category (e.g., 'OWL')
+  const animalCat = animal?.category?.toUpperCase().trim() || ''; 
 
-  // 2. Fetch Operational Lists
   const { data: opLists = [] } = useQuery({
     queryKey: ['operational_lists'],
     queryFn: async () => {
-      const { data } = await supabase.from('operational_lists').select('name, category, description').eq('is_deleted', false);
+      // UPDATED: Now fetches animal_category instead of description
+      const { data } = await supabase.from('operational_lists').select('name, category, animal_category').eq('is_deleted', false);
       return data || [];
     }
   });
 
-  // 3. Smart Filtering Engine matching the exact requested schema
+  // Clean, exact matching engine
   const foodOptions = useMemo(() => {
     return opLists.filter(l => {
-      // Look explicitly for 'food_type' in the operational list category
-      const isFood = l.category?.toLowerCase() === 'food_type';
-      if (!isFood) return false;
+      if (l.category?.toLowerCase() !== 'food_type') return false;
       
-      // If the list item has a description, cross-reference it with the animal's description
-      if (l.description && animalFilterKey) {
-        const listDesc = l.description.toUpperCase();
-        return listDesc.includes(animalFilterKey) || animalFilterKey.includes(listDesc);
+      const targetCategory = l.animal_category?.toUpperCase().trim();
+      
+      if (targetCategory && animalCat) {
+        // .includes() allows an operational list tagged as "OWL, RAPTOR" to match an animal tagged "OWL"
+        return targetCategory.includes(animalCat);
       }
       
-      // Global fallback: If the list item has no description, show it for all animals just in case
-      return true;
+      return true; // Global fallback if the operational list item has no animal_category assigned
     });
-  }, [opLists, animalFilterKey]);
+  }, [opLists, animalCat]);
 
   const methodOptions = useMemo(() => {
     return opLists.filter(l => {
-      // Look explicitly for 'feed_method' in the operational list category
-      const isMethod = l.category?.toLowerCase() === 'feed_method';
-      if (!isMethod) return false;
+      if (l.category?.toLowerCase() !== 'feed_method') return false;
       
-      if (l.description && animalFilterKey) {
-        const listDesc = l.description.toUpperCase();
-        return listDesc.includes(animalFilterKey) || animalFilterKey.includes(listDesc);
+      const targetCategory = l.animal_category?.toUpperCase().trim();
+      
+      if (targetCategory && animalCat) {
+        return targetCategory.includes(animalCat);
       }
       
-      return true;
+      return true; 
     });
-  }, [opLists, animalFilterKey]);
+  }, [opLists, animalCat]);
 
   const insertFeedMutation = useMutation({
     mutationFn: async (values: FeedFormValues) => {
@@ -143,7 +139,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData }: FeedModalP
         id: initialData.id,
         food_item: initialData.food_item || '',
         feed_method: initialData.feed_method || '',
-        quantity: initialData.quantity || initialData.quantity_consumed || initialData.food_consumed_g || 1,
+        quantity: initialData.quantity ?? initialData.quantity_consumed ?? initialData.food_consumed_g ?? initialData.quantity_offered ?? 1,
         unit: (initialData.unit === 'grams' || initialData.unit === 'g') ? 'grams' : 'whole_item',
         calci_dust_added: initialData.calci_dust_added || false,
       }] : [{ food_item: '', feed_method: '', quantity: 1, unit: 'whole_item', calci_dust_added: false }]
@@ -170,10 +166,9 @@ export function FeedModal({ isOpen, onClose, animalId, initialData }: FeedModalP
             <h2 className="text-lg font-black text-slate-800 uppercase tracking-tight">
               {initialData ? 'Edit Feed' : 'Log Feed'}
             </h2>
-            {/* UI HELPER: Displays the animal's description so the user knows what filter is active */}
-            {animal?.description && (
+            {animalCat && (
               <span className="px-2 py-0.5 bg-slate-100 text-slate-500 rounded text-[10px] font-bold tracking-widest uppercase">
-                {animal.description}
+                {animalCat}
               </span>
             )}
           </div>
@@ -267,7 +262,7 @@ export function FeedModal({ isOpen, onClose, animalId, initialData }: FeedModalP
                                 <input
                                   type="number" step="0.1"
                                   value={field.state.value as number}
-                                  onChange={(e) => field.handleChange(parseFloat(e.target.value))}
+                                  onChange={(e) => field.handleChange(parseFloat(e.target.value) || 0)}
                                   className="w-full px-3 py-3 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none"
                                 />
                                 <FieldError meta={field.state.meta} />
@@ -284,8 +279,8 @@ export function FeedModal({ isOpen, onClose, animalId, initialData }: FeedModalP
                                   onChange={(e) => field.handleChange(e.target.value)}
                                   className="w-full px-3 py-3 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-emerald-500 outline-none bg-white"
                                 >
-                                  <option value="whole_item">Whole Item(s)</option>
-                                  <option value="grams">Grams (g)</option>
+                                  <option value="whole_item">Items</option>
+                                  <option value="grams">Grams</option>
                                 </select>
                               </div>
                             )}
