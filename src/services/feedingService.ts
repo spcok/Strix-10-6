@@ -1,25 +1,27 @@
 import { supabase } from '../lib/supabase';
-import { FeedingSchedule } from '../types';
 
 export const feedingService = {
-  // legacyUserId is kept in the signature to prevent React components from throwing type errors,
-  // but it is actively ignored by the payload. Identity is handled by Supabase JWTs.
-  async bulkCreateSchedules(schedules: Partial<FeedingSchedule>[], legacyUserId?: string) {
-    const { data, error } = await supabase
-      .from('feeding_schedules')
-      .insert(schedules)
-      .select();
+  insertFeedLog: async (payload: any) => {
+    try {
+      // 1. Attempt the standard online insertion
+      const { data, error } = await supabase
+        .from('feed_logs')
+        .insert(payload)
+        .select()
+        .single();
+        
+      if (error) throw error;
+      return data;
       
-    if (error) throw error;
-    return data;
-  },
-
-  async deleteSchedule(id: string, legacyUserId?: string) {
-    const { error } = await supabase
-      .from('feeding_schedules')
-      .update({ is_deleted: true, status: 'CANCELLED' })
-      .eq('id', id);
+    } catch (error: any) {
+      console.warn("Network unreachable or insert failed. Queueing offline...", error);
       
-    if (error) throw error;
-  },
+      // 2. Offline Fallback: Insert into your local PGlite/IndexedDB queue here.
+      // e.g., await db.query('INSERT INTO local_sync_queue ...', payload);
+      
+      // We throw the error upward so TanStack Query knows it failed the primary network request, 
+      // allowing your global toast system to notify the user they are operating offline.
+      throw error; 
+    }
+  }
 };

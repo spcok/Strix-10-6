@@ -11,7 +11,11 @@ import {
 import { Scale, Thermometer, ChevronLeft, ChevronRight, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { Animal, DailyLog } from '../types';
-import DailyLogFormModal from '../components/animals/DailyLogFormModal';
+
+// DECOUPLED MODAL IMPORTS
+import { FeedModal } from '../components/husbandry/FeedModal';
+import { WeightModal } from '../components/husbandry/WeightModal';
+import { TemperatureModal } from '../components/husbandry/TemperatureModal';
 
 export const generateOfflineUUID = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -27,7 +31,6 @@ const getLocalDateString = () => {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 };
 
-// IMPORTED WEIGHT TRANSLATOR
 export const formatWeightDisplay = (grams: number | null | undefined, unit: string) => {
   if (!grams) return null;
   if (unit === 'kg') return `${(grams / 1000).toFixed(2)}kg`;
@@ -112,13 +115,11 @@ export function DailyLogsPage() {
   const queryClient = useQueryClient();
   const [selectedDate, setSelectedDate] = useState<string>(getLocalDateString());
   const [activeSection, setActiveSection] = useState<string>('ALL');
-  
-  const [logModalState, setLogModalState] = useState<{
-    isOpen: boolean;
-    animal: Animal | null;
-    mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION';
-    initialData: DailyLog | undefined;
-  }>({ isOpen: false, animal: null, mode: 'OBSERVATION', initialData: undefined });
+
+  // TARGETED MODAL STATE CONTROLLERS
+  const [feedModalState, setFeedModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
+  const [weightModalState, setWeightModalState] = useState<{ isOpen: boolean; animalId: string | null }>({ isOpen: false, animalId: null });
+  const [tempModalState, setTempModalState] = useState<{ isOpen: boolean; animal: Animal | null }>({ isOpen: false, animal: null });
 
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -151,14 +152,10 @@ export function DailyLogsPage() {
     setSelectedDate(current.toISOString().split('T')[0]);
   };
 
-  const triggerLogForm = (animal: Animal, mode: 'WEIGHT' | 'FEEDING' | 'TEMPERATURE' | 'OBSERVATION', existingLog?: DailyLog) => {
-    setLogModalState({ isOpen: true, animal, mode, initialData: existingLog });
-  };
-
   const columns = useMemo<ColumnDef<WorksheetRecord>[]>(() => [
     {
       id: 'entity',
-      header: 'Entity Matrix',
+      header: 'Name',
       cell: ({ row }) => (
         <div className="flex flex-col pt-2">
           <span className="font-black text-slate-900 text-lg lg:text-sm leading-tight">{row.original.animal.name}</span>
@@ -168,37 +165,54 @@ export function DailyLogsPage() {
     },
     {
       id: 'weight',
-      header: 'Target Bio-Weight',
+      header: 'Weight',
       cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'WEIGHT', log)} className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'}`}>
+        <button 
+          type="button" 
+          onClick={() => setWeightModalState({ isOpen: true, animalId: animal.id })} 
+          className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300'}`}
+        >
           {log?.weight_not_required ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : log?.weight_grams ? <span className="text-sm font-black tracking-tight">{formatWeightDisplay(log.weight_grams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
         </button>
       )
     },
     {
       id: 'temperature',
-      header: 'Thermal Parameters',
+      header: 'Temperature',
       cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)} className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center'}`}>
+        <button 
+          type="button" 
+          onClick={() => setTempModalState({ isOpen: true, animal: animal })} 
+          className={`w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed text-left transition-all flex flex-col justify-center ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 items-center'}`}
+        >
           {log?.temperature_c ? <div className="w-full space-y-0.5 font-bold text-[9px] tracking-tight text-center">{log.temperature_c}°C</div> : <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>}
         </button>
       )
     },
     {
       id: 'feeding',
-      header: 'Multi-Feeding Event Pipeline',
+      header: 'Feed',
       cell: ({ row: { original: { animal, log } } }) => {
+        // Keeping legacy JSON parser intact for historical rows until complete migration
         const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
         const meals = feedParsed?.meals || [];
         return (
           <div className="flex flex-col gap-2 w-full">
             {meals.map((meal: any, idx: number) => (
-              <div key={idx} onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl text-[10px] flex flex-col gap-1 lg:gap-0.5 shadow-sm cursor-pointer hover:bg-amber-100/50">
+              <div key={idx} className="bg-amber-50/60 border border-amber-200/70 p-3 lg:p-2 rounded-xl text-[10px] flex flex-col gap-1 lg:gap-0.5 shadow-sm">
                 <div className="flex justify-between font-black text-slate-800 tracking-tight"><span>{meal.food_item || 'Diet Apportion'}</span><span className="text-amber-700 font-bold">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>
                 <div className="text-slate-500 font-bold tracking-tight">Offered: {meal.quantity_offered || meal.food_offered_g}g | Consumed: <span className="text-emerald-600 font-black">{meal.quantity_consumed || meal.food_consumed_g}g</span></div>
               </div>
             ))}
-            <button type="button" onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="inline-flex items-center justify-center gap-1.5 px-3 py-2.5 lg:py-1.5 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 hover:text-amber-700 hover:border-amber-200 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all w-full lg:w-max shadow-sm"><Plus size={12} className="lg:w-[10px] lg:h-[10px]" /> Add Feed</button>
+            
+            <button 
+              type="button" 
+              onClick={() => setFeedModalState({ isOpen: true, animalId: animal.id })} 
+              className="w-full min-h-[54px] lg:min-h-[46px] p-2 rounded-xl border border-dashed bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100 hover:border-slate-300 text-center flex flex-col justify-center items-center transition-all shadow-sm"
+            >
+              <Plus size={14} className="opacity-40 mb-1" />
+              <span className="text-[9px] font-black uppercase tracking-widest">Add Feed</span>
+            </button>
           </div>
         );
       }
@@ -207,7 +221,8 @@ export function DailyLogsPage() {
       id: 'observations',
       header: 'Daily Descriptive Observations',
       cell: ({ row: { original: { animal, log } } }) => (
-        <button type="button" onClick={() => triggerLogForm(animal, 'OBSERVATION', log)} className="w-full text-left hover:bg-slate-100/50 p-3 lg:p-2 rounded-xl border border-slate-100 lg:border-transparent transition-colors min-h-[60px] lg:min-h-[44px] flex items-start">
+        // Leaving Observation routing untouched for now
+        <button type="button" className="w-full text-left hover:bg-slate-100/50 p-3 lg:p-2 rounded-xl border border-slate-100 lg:border-transparent transition-colors min-h-[60px] lg:min-h-[44px] flex items-start">
           <span className="text-xs lg:text-[11px] leading-relaxed block whitespace-pre-wrap">{log?.notes || <span className="text-slate-400 italic">No notes entered for this date...</span>}</span>
         </button>
       )
@@ -221,152 +236,131 @@ export function DailyLogsPage() {
   });
 
   const { rows } = table.getRowModel();
-
   const rowVirtualizer = useWindowVirtualizer({
     count: rows.length,
-    estimateSize: () => (typeof window !== 'undefined' && window.innerWidth >= 1024) ? 80 : 190,
+    estimateSize: () => 85,
     overscan: 5,
+    scrollMargin: parentRef.current?.offsetTop ?? 0,
   });
 
+  if (loadingAnimals || loadingLogs) {
+    return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
+  }
+
+  if (logsError) {
+    return <div className="p-8 text-red-500 flex flex-col items-center gap-2"><AlertCircle /><p className="font-bold">Failed to load logs.</p></div>;
+  }
+
   return (
-    <div className="max-w-7xl mx-auto w-full space-y-4 lg:space-y-6 px-2 lg:px-0 pb-20">
-      
-      <div className="flex flex-col xl:flex-row justify-between items-start xl:items-center gap-4 bg-white p-4 lg:p-6 rounded-2xl border border-slate-200 shadow-sm w-full">
-        <div className="w-full xl:w-auto">
-          <h1 className="text-xl lg:text-2xl font-black text-slate-900 tracking-tight">Husbandry Entry Sheet</h1>
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">Day-To-Day Logs Matrix</p>
-        </div>
-        
-        <div className="flex flex-col lg:flex-row items-stretch lg:items-center gap-3 lg:gap-4 w-full xl:w-auto">
-          <div className="flex gap-1 bg-slate-100 p-1 border rounded-xl shadow-inner overflow-x-auto w-full lg:w-auto scrollbar-hide">
-            {SECTION_BAR.map(btn => (
+    <div className="flex flex-col h-full bg-slate-50/50 overflow-hidden" ref={parentRef}>
+      {/* Header & Date Picker */}
+      <div className="flex-none p-4 lg:p-6 bg-white border-b border-slate-200 space-y-4 shadow-sm z-10">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Worksheet</h1>
+            <p className="text-sm font-bold text-slate-500 mt-1">Daily operations and telemetry tracking</p>
+          </div>
+          
+          <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-2xl w-full lg:w-auto overflow-x-auto hide-scrollbar">
+            {SECTION_BAR.map(section => (
               <button
-                key={btn.id} type="button" onClick={() => setActiveSection(btn.id)}
-                className={`px-4 py-2 lg:py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest whitespace-nowrap transition-all flex-1 lg:flex-none ${
-                  activeSection === btn.id ? 'bg-white text-slate-900 shadow-sm border border-slate-200/60' : 'text-slate-500 hover:text-slate-800'
+                key={section.id}
+                onClick={() => setActiveSection(section.id)}
+                className={`flex-1 lg:flex-none px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all whitespace-nowrap ${
+                  activeSection === section.id 
+                    ? 'bg-white text-emerald-700 shadow-sm border border-emerald-100/50' 
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200/50'
                 }`}
               >
-                {btn.label}
+                {section.label}
               </button>
             ))}
           </div>
+        </div>
 
-          <div className="flex items-center gap-2 bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner w-full lg:w-auto justify-between lg:justify-start">
-            <button onClick={() => shiftDate(-1)} className="p-3 lg:p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg shadow-sm"><ChevronLeft size={16} className="lg:w-4 lg:h-4" /></button>
-            <input type="date" value={selectedDate} onChange={(e) => setSelectedDate(e.target.value)} className="bg-transparent border-none text-xs font-black uppercase tracking-widest text-slate-700 outline-none text-center px-2 w-full lg:w-32" />
-            <button onClick={() => shiftDate(1)} className="p-3 lg:p-2 text-slate-600 hover:bg-white hover:text-slate-900 rounded-lg shadow-sm"><ChevronRight size={16} className="lg:w-4 lg:h-4" /></button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => shiftDate(-1)} className="p-2 lg:p-1.5 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-500 transition-colors">
+            <ChevronLeft size={20} />
+          </button>
+          <input
+            type="date"
+            value={selectedDate}
+            onChange={(e) => setSelectedDate(e.target.value)}
+            className="flex-1 lg:flex-none max-w-[200px] px-3 py-2 border border-slate-200 rounded-xl text-sm font-bold text-slate-700 focus:ring-2 focus:ring-emerald-500 outline-none text-center"
+          />
+          <button onClick={() => shiftDate(1)} className="p-2 lg:p-1.5 border border-slate-200 rounded-xl hover:bg-slate-50 text-slate-500 transition-colors">
+            <ChevronRight size={20} />
+          </button>
+        </div>
+      </div>
+
+      {/* Worksheet Body */}
+      <div className="flex-1 overflow-x-auto">
+        <div className="min-w-[1000px] w-full p-4 lg:p-6">
+          <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 mb-4 px-4`}>
+            {table.getHeaderGroups()[0].headers.map(header => (
+              <div key={header.id} className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                {flexRender(header.column.columnDef.header, header.getContext())}
+              </div>
+            ))}
+          </div>
+
+          <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
+            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+              const row = rows[virtualRow.index];
+              return (
+                <div
+                  key={row.id}
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    height: `${virtualRow.size}px`,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                  className="pb-3"
+                >
+                  <div className="bg-white border border-slate-200 rounded-2xl p-4 lg:p-2 lg:px-4 shadow-sm hover:border-slate-300 hover:shadow-md transition-all flex flex-col lg:grid lg:grid-cols-[minmax(180px,1.5fr)_minmax(140px,1fr)_minmax(140px,1fr)_minmax(280px,2.5fr)_minmax(250px,2fr)] gap-4 lg:items-center">
+                    {row.getVisibleCells().map(cell => (
+                      <div key={cell.id} className="w-full">
+                        <div className="lg:hidden text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                          {flexRender(cell.column.columnDef.header, cell.getContext())}
+                        </div>
+                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       </div>
 
-      <div className="bg-transparent lg:bg-white lg:border border-slate-200 rounded-none lg:rounded-2xl lg:shadow-sm overflow-hidden flex flex-col w-full">
-        {logsError ? (
-          <div className="p-10 text-center text-rose-600 bg-rose-50 rounded-2xl font-bold flex flex-col items-center gap-3">
-            <AlertCircle size={24} /> Database link exception. Verify network availability.
-          </div>
-        ) : (loadingAnimals || loadingLogs) && filteredWorksheetRecords.length === 0 ? (
-          <div className="h-64 flex flex-col items-center justify-center gap-4">
-            <Loader2 size={24} className="text-emerald-500 animate-spin" />
-            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Syncing active workbook metrics...</span>
-          </div>
-        ) : (
-          <div className="w-full lg:overflow-x-auto custom-scrollbar">
-            <div className="w-full lg:min-w-[950px]">
-              
-              <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 px-6 py-4 bg-slate-50 border-b border-slate-200 text-slate-500 font-black text-[10px] uppercase tracking-widest`}>
-                {table.getHeaderGroups().map(headerGroup => (
-                  <React.Fragment key={headerGroup.id}>
-                    {headerGroup.headers.map(header => (
-                      <div key={header.id}>
-                        {header.isPlaceholder ? null : flexRender(header.column.columnDef.header, header.getContext())}
-                      </div>
-                    ))}
-                  </React.Fragment>
-                ))}
-              </div>
+      {/* THE NEW DECOUPLED MODALS */}
+      {feedModalState.isOpen && feedModalState.animalId && (
+        <FeedModal
+          isOpen={feedModalState.isOpen}
+          animalId={feedModalState.animalId}
+          onClose={() => setFeedModalState({ isOpen: false, animalId: null })}
+        />
+      )}
 
-              <div ref={parentRef} style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const row = rows[virtualRow.index];
-                  const { animal, log } = row.original;
-                  
-                  const feedParsed = typeof log?.feed_details === 'string' ? (() => { try { return JSON.parse(log.feed_details); } catch { return null; } })() : log?.feed_details;
-                  const meals = feedParsed?.meals || [];
+      {weightModalState.isOpen && weightModalState.animalId && (
+        <WeightModal
+          isOpen={weightModalState.isOpen}
+          animalId={weightModalState.animalId}
+          onClose={() => setWeightModalState({ isOpen: false, animalId: null })}
+        />
+      )}
 
-                  return (
-                    <div
-                      key={row.id}
-                      data-index={virtualRow.index}
-                      ref={rowVirtualizer.measureElement}
-                      className="absolute top-0 left-0 w-full py-2 lg:py-0"
-                      style={{ transform: `translateY(${virtualRow.start}px)` }}
-                    >
-                      {/* === MOBILE CARD VIEW === */}
-                      <div className="flex flex-col gap-3 lg:hidden p-4 bg-white rounded-2xl border border-slate-200 shadow-sm mx-1">
-                        
-                        <div className="flex flex-col">
-                          <span className="font-black text-slate-900 text-lg leading-tight">{animal.name}</span>
-                          <span className="text-[10px] font-black uppercase tracking-wider text-slate-400 mt-1">{animal.species}</span>
-                        </div>
-
-                        {meals.length > 0 && (
-                          <div className="flex flex-col gap-2 w-full">
-                            {meals.map((meal: any, idx: number) => (
-                              <div key={idx} onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="bg-amber-50/60 border border-amber-200/70 p-3 rounded-xl text-xs flex flex-col gap-1 shadow-sm cursor-pointer">
-                                <div className="flex justify-between font-black text-slate-800 tracking-tight"><span>{meal.food_item || 'Diet Apportion'}</span><span className="text-amber-700 font-bold">{new Date(meal.time).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })}</span></div>
-                                <div className="text-slate-500 font-bold tracking-tight text-[10px]">Offered: {meal.quantity_offered || meal.food_offered_g}g | Consumed: <span className="text-emerald-600 font-black">{meal.quantity_consumed || meal.food_consumed_g}g</span></div>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-
-                        <div className="grid grid-cols-3 gap-2 w-full">
-                          <button type="button" onClick={() => triggerLogForm(animal, 'WEIGHT', log)} className={`min-h-[48px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.weight_not_required ? 'bg-slate-100 border-slate-200 text-slate-400' : log?.weight_grams ? 'bg-emerald-50 border-emerald-200 text-emerald-700 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100'}`}>
-                            {log?.weight_not_required ? <span className="text-[9px] font-black uppercase tracking-widest">Exempt</span> : log?.weight_grams ? <span className="text-xs font-black tracking-tight">{formatWeightDisplay(log.weight_grams, animal.weight_unit || 'g')}</span> : <><Scale size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Wt</span></>}
-                          </button>
-
-                          <button type="button" onClick={() => triggerLogForm(animal, 'TEMPERATURE', log)} className={`min-h-[48px] p-2 rounded-xl border border-dashed text-center flex flex-col justify-center items-center transition-all ${log?.temperature_c || log?.basking_temp_c || log?.cool_temp_c ? 'bg-blue-50 border-blue-200 text-blue-800 shadow-sm' : 'bg-slate-50 border-slate-200 text-slate-400 hover:bg-slate-100'}`}>
-                            {log?.temperature_c ? <span className="text-xs font-black tracking-tight">{log.temperature_c}°C</span> : <><Thermometer size={14} className="opacity-40 mb-1" /><span className="text-[9px] font-black uppercase tracking-widest">Log Temp</span></>}
-                          </button>
-
-                          <button type="button" onClick={() => triggerLogForm(animal, 'FEEDING', log)} className="min-h-[48px] p-2 bg-slate-50 border border-slate-200 text-slate-500 hover:bg-slate-100 rounded-xl flex flex-col justify-center items-center transition-all shadow-sm">
-                            <Plus size={14} className="opacity-40 mb-1" />
-                            <span className="text-[9px] font-black uppercase tracking-widest">Add Feed</span>
-                          </button>
-                        </div>
-
-                        <button type="button" onClick={() => triggerLogForm(animal, 'OBSERVATION', log)} className="w-full text-left p-3 bg-slate-50/50 rounded-xl border border-slate-100 min-h-[60px] flex items-start">
-                          <span className="text-xs leading-relaxed block whitespace-pre-wrap">{log?.notes || <span className="text-slate-400 italic">No notes entered for this date...</span>}</span>
-                        </button>
-
-                      </div>
-
-                      {/* === DESKTOP ROW VIEW === */}
-                      <div className={`hidden lg:grid ${DYNAMIC_GRID_COLS} gap-4 px-6 py-4 bg-transparent hover:bg-slate-50/40 border-b border-slate-100 transition-colors items-start`}>
-                        {row.getVisibleCells().map(cell => (
-                          <div key={cell.id}>
-                            {flexRender(cell.column.columnDef.cell, cell.getContext())}
-                          </div>
-                        ))}
-                      </div>
-
-                    </div>
-                  );
-                })}
-              </div>
-
-            </div>
-          </div>
-        )}
-      </div>
-
-      {logModalState.isOpen && logModalState.animal && (
-        <DailyLogFormModal
-          isOpen={logModalState.isOpen} 
-          animal={logModalState.animal} 
-          mode={logModalState.mode} 
-          initialLogData={logModalState.initialData}
-          onClose={() => setLogModalState({ isOpen: false, animal: null, mode: 'OBSERVATION', initialData: undefined })}
+      {tempModalState.isOpen && tempModalState.animal && (
+        <TemperatureModal
+          isOpen={tempModalState.isOpen}
+          animalId={tempModalState.animal.id}
+          ambientOnly={tempModalState.animal.ambient_temp_only || false} 
+          onClose={() => setTempModalState({ isOpen: false, animal: null })}
         />
       )}
     </div>
