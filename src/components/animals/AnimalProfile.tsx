@@ -1,14 +1,14 @@
 import React, { useState } from 'react';
-import { useParams, Link } from '@tanstack/react-router';
+import { useParams } from '@tanstack/react-router';
 import { useQuery } from '@tanstack/react-query';
 import { 
-  FileText, Stethoscope, ClipboardList, ArrowLeft, Edit2, Archive, 
-  AlertTriangle, ShieldAlert, Scale, Thermometer, GitMerge, X
+  FileText, ClipboardList, ArrowLeft, Edit2, Archive, 
+  AlertTriangle, ShieldAlert, Scale, X, CalendarDays, Target, 
+  ThermometerSun, Droplets, MapPin, GitMerge
 } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { IUCNBadge } from './IUCNBadge';
 import AnimalFormModal from './AnimalFormModal';
-import MedicalRecords from '../medical/MedicalRecords';
 import HusbandryLogs from '../husbandry/HusbandryLogs';
 
 export interface Props {
@@ -24,13 +24,12 @@ const formatWeight = (val: number | null | undefined, unit?: string) => {
   return `${val}${unit || 'g'}`;
 };
 
-// Dual Export: Resolves the "does not provide an export named..." error
 export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onClose }: Props) {
   const params = useParams({ strict: false }) as Record<string, any>;
   const effectiveId = passedAnimal?.id || animalId || id || params.id || '';
   const handleClose = onClose || onBack;
   
-  const [activeTab, setActiveTab] = useState<'profile' | 'medical' | 'husbandry'>('profile');
+  const [activeTab, setActiveTab] = useState<'profile' | 'husbandry' | 'events' | 'training'>('profile');
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
 
   const { data: animal, isLoading } = useQuery({
@@ -80,6 +79,7 @@ export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onCl
           </div>
         )}
 
+        {/* HEADER CARD - ZLA COMPLIANT */}
         <div className="bg-white rounded-3xl p-5 flex flex-col md:flex-row gap-8 shadow-2xl">
           <div className="w-full md:w-[280px] h-[280px] shrink-0 rounded-2xl overflow-hidden bg-slate-100 shadow-inner border border-slate-200">
             <img 
@@ -108,10 +108,12 @@ export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onCl
             <div className="mb-8 pr-32">
               <h1 className="text-4xl font-black text-slate-900 tracking-tight mb-2 truncate">{animal.name}</h1>
               <p className="text-[10px] font-bold text-slate-500 font-mono tracking-widest uppercase mb-1">ID: {animal.id.toUpperCase()}</p>
-              <p className="text-[10px] font-bold text-slate-500 font-mono tracking-widest uppercase">RING: {animal.ring_number || 'UN-RINGED'} | CHIP: {animal.microchip_id || 'NONE'}</p>
+              <p className="text-[10px] font-bold text-slate-500 font-mono tracking-widest uppercase">
+                RING: {animal.ring_number || 'UN-RINGED'} | CHIP: {animal.microchip_id || 'NONE'}
+              </p>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-3 gap-6">
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-y-6 gap-x-4">
               <div>
                 <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Species</span>
                 <span className="text-sm font-bold text-slate-900">{animal.species}</span>
@@ -121,31 +123,36 @@ export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onCl
                 <span className="text-sm font-bold text-slate-900 italic">{animal.latin_name || 'N/A'}</span>
               </div>
               <div>
-                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">DOB</span>
-                <span className="text-sm font-bold text-slate-900">{animal.date_of_birth ? new Date(animal.date_of_birth).toLocaleDateString() : 'Unknown'}</span>
+                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Gender</span>
+                <span className="text-sm font-bold text-slate-900">{animal.gender || 'UNKNOWN'}</span>
+              </div>
+              <div>
+                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Date of Birth</span>
+                <span className="text-sm font-bold text-slate-900">
+                  {animal.is_dob_unknown ? 'Unknown' : animal.date_of_birth ? new Date(animal.date_of_birth).toLocaleDateString() : 'Unrecorded'}
+                  {animal.is_dob_estimated && <span className="ml-1 text-[10px] text-slate-500 font-medium">(Approx)</span>}
+                </span>
               </div>
               <div>
                 <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Location</span>
                 <span className="text-sm font-bold text-slate-900">{animal.location || 'Unassigned'}</span>
               </div>
               <div>
-                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Acquired</span>
-                <span className="text-sm font-bold text-slate-900">{animal.acquisition_date ? new Date(animal.acquisition_date).toLocaleDateString() : 'Unknown'}</span>
-              </div>
-              <div>
-                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Mob/Group</span>
-                <span className="text-sm font-bold text-slate-900">{animal.parent_group_id || 'Individual'}</span>
+                <span className="block text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1.5">Category</span>
+                <span className="text-sm font-bold text-slate-900">{animal.category || 'N/A'}</span>
               </div>
             </div>
           </div>
         </div>
 
+        {/* TABS & BODY */}
         <div className="bg-white rounded-3xl shadow-2xl overflow-hidden flex flex-col min-h-[500px]">
           <div className="flex border-b border-slate-100 px-2 pt-2 bg-slate-50 shrink-0 overflow-x-auto custom-scrollbar">
             {[
               { id: 'profile', label: 'Profile Matrix', icon: FileText },
-              { id: 'medical', label: 'Medical', icon: Stethoscope },
               { id: 'husbandry', label: 'Husbandry Logs', icon: ClipboardList },
+              { id: 'events', label: 'Events', icon: CalendarDays },
+              { id: 'training', label: 'Training', icon: Target },
             ].map(tab => {
               const isActive = activeTab === tab.id;
               return (
@@ -163,60 +170,150 @@ export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onCl
           </div>
 
           <div className="p-6 bg-white flex-1 overflow-y-auto custom-scrollbar">
+            
             {activeTab === 'profile' && (
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                {/* LEFT COLUMN */}
                 <div className="lg:col-span-2 space-y-6">
-                  <div className="bg-rose-50/80 border border-rose-200 rounded-2xl p-5 shadow-sm">
-                    <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-rose-900 mb-4">
-                      <AlertTriangle size={16} className="text-rose-600" /> Critical Husbandry Notes
+                  
+                  {animal.critical_husbandry_notes && (
+                    <div className="bg-rose-50/80 border border-rose-200 rounded-2xl p-5 shadow-sm">
+                      <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-rose-900 mb-4">
+                        <AlertTriangle size={16} className="text-rose-600" /> Critical Husbandry Notes
+                      </h3>
+                      <div className="text-sm font-bold text-rose-800 space-y-2">
+                        {Array.isArray(animal.critical_husbandry_notes) 
+                            ? animal.critical_husbandry_notes.map((n: string, i: number) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n}</span></p>)
+                            : String(animal.critical_husbandry_notes).split('\n').map((n, i) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n.replace(/^- /, '')}</span></p>)
+                        }
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm">
+                    <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
+                      <Scale size={16} className="text-emerald-600" /> Biometrics & Weight Parameters
                     </h3>
-                    <div className="text-sm font-bold text-rose-800 space-y-2">
-                      {animal.critical_husbandry_notes ? (
-                        Array.isArray(animal.critical_husbandry_notes) 
-                          ? animal.critical_husbandry_notes.map((n: string, i: number) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n}</span></p>)
-                          : String(animal.critical_husbandry_notes).split('\n').map((n, i) => <p key={i} className="flex gap-3"><span className="text-rose-500 font-black">-</span><span>{n.replace(/^- /, '')}</span></p>)
-                      ) : 'No critical alerts logged.'}
+                    <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+                      <div className="p-3 bg-white border border-slate-100 rounded-xl">
+                        <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Target / Flying</span>
+                        <span className="text-lg font-black text-slate-800">{formatWeight(animal.flying_weight, animal.weight_unit)}</span>
+                      </div>
+                      <div className="p-3 bg-white border border-slate-100 rounded-xl">
+                        <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Winter / Resting</span>
+                        <span className="text-lg font-black text-slate-800">{formatWeight(animal.winter_weight, animal.weight_unit)}</span>
+                      </div>
                     </div>
                   </div>
-                  <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm w-full md:w-[60%]">
-                    <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
-                      <Scale size={16} className="text-emerald-600" /> Weights
-                    </h3>
-                    <div className="flex justify-between pb-2 border-b border-slate-200 mb-2"><span>Flying:</span> <b>{formatWeight(animal.flying_weight, animal.weight_unit)}</b></div>
-                    <div className="flex justify-between"><span>Winter:</span> <b>{formatWeight(animal.winter_weight, animal.weight_unit)}</b></div>
-                  </div>
+
+                  {animal.category === 'EXOTIC' && (
+                    <div className="bg-orange-50/30 border border-orange-200 rounded-2xl p-5 shadow-sm">
+                      <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
+                        <ThermometerSun size={16} className="text-orange-500" /> Environmental Parameters
+                      </h3>
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        <div>
+                          <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Day Target</span>
+                          <span className="text-sm font-black text-slate-800">{animal.target_day_temp_c ? `${animal.target_day_temp_c}°C` : '--'}</span>
+                        </div>
+                        <div>
+                          <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Night Target</span>
+                          <span className="text-sm font-black text-slate-800">{animal.target_night_temp_c ? `${animal.target_night_temp_c}°C` : '--'}</span>
+                        </div>
+                        <div>
+                          <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1">Humidity Range</span>
+                          <span className="text-sm font-black text-slate-800">
+                            {animal.target_humidity_min_percent ? `${animal.target_humidity_min_percent}%` : '--'} - {animal.target_humidity_max_percent ? `${animal.target_humidity_max_percent}%` : '--'}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 flex items-center gap-1"><Droplets size={10} /> Misting</span>
+                          <span className="text-sm font-black text-slate-800">{animal.misting_not_required ? 'Not Req.' : (animal.misting_frequency || '--')}</span>
+                        </div>
+                      </div>
+                    </div>
+                  )}
+
+                  {animal.description && (
+                     <div className="bg-slate-50 border border-slate-200 rounded-2xl p-5 shadow-sm">
+                        <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-2">Description & Identifying Marks</h3>
+                        <p className="text-sm font-medium text-slate-700 leading-relaxed">{animal.description}</p>
+                     </div>
+                  )}
                 </div>
+
+                {/* RIGHT COLUMN */}
                 <div className="space-y-6">
+                  
                   <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
                     <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
-                      <ShieldAlert size={16} className="text-amber-500" /> Safety
+                      <ShieldAlert size={16} className="text-amber-500" /> Safety & Status
                     </h3>
-                    <div className="flex justify-between items-center">
-                      <span className="text-sm font-bold text-slate-500">Hazard Rating:</span>
-                      <span className={`text-sm font-black uppercase tracking-wide ${animal.hazard_rating === 'HIGH' ? 'text-rose-600' : animal.hazard_rating === 'MEDIUM' ? 'text-amber-600' : 'text-slate-900'}`}>
-                        {animal.hazard_rating || 'LOW'}
-                      </span>
+                    <div className="space-y-4">
+                      <div className="flex justify-between items-center pb-3 border-b border-slate-100">
+                        <span className="text-xs font-bold text-slate-500">Hazard Rating</span>
+                        <span className={`text-xs font-black uppercase tracking-widest px-2 py-1 rounded ${animal.hazard_rating === 'HIGH' ? 'bg-rose-100 text-rose-700' : animal.hazard_rating === 'MEDIUM' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-700'}`}>
+                          {animal.hazard_rating || 'LOW'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center pb-3 border-b border-slate-100">
+                        <span className="text-xs font-bold text-slate-500">Conservation</span>
+                        <IUCNBadge status={animal.red_list_status} />
+                      </div>
+                      {animal.is_venomous && (
+                        <div className="bg-rose-50 border border-rose-200 text-rose-700 text-xs font-black uppercase tracking-widest p-2.5 rounded-xl text-center flex items-center justify-center gap-2">
+                          <AlertTriangle size={14} /> Venomous Species
+                        </div>
+                      )}
                     </div>
-                    {animal.is_venomous && <div className="mt-4 bg-rose-100 border border-rose-200 text-rose-800 text-[10px] font-black uppercase tracking-widest p-2 rounded text-center">Venomous Species</div>}
                   </div>
+
                   <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm">
                     <h3 className="flex items-center gap-2 text-[11px] font-black uppercase tracking-widest text-slate-900 mb-4">
-                      <GitMerge size={16} className="text-purple-500" /> Registry & IUCN
+                      <GitMerge size={16} className="text-purple-500" /> Lineage & Origin
                     </h3>
-                    <div className="flex justify-between items-center mb-3">
-                      <span className="text-xs font-bold text-slate-500">Conservation:</span>
-                      <IUCNBadge status={animal.red_list_status} />
-                    </div>
-                    <div className="space-y-1">
-                      <div className="flex justify-between"><span className="text-[10px] font-bold text-slate-400">Sire ID:</span><span className="text-[10px] font-mono text-slate-800">{animal.sire_id || 'Unknown'}</span></div>
-                      <div className="flex justify-between mt-1"><span className="text-[10px] font-bold text-slate-400">Dam ID:</span><span className="text-[10px] font-mono text-slate-800">{animal.dam_id || 'Unknown'}</span></div>
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                           <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Sire ID</span>
+                           <span className="text-xs font-mono text-slate-800 truncate block" title={animal.sire_id || 'Unknown'}>{animal.sire_id ? animal.sire_id.substring(0,8)+'...' : 'Unknown'}</span>
+                        </div>
+                        <div>
+                           <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400">Dam ID</span>
+                           <span className="text-xs font-mono text-slate-800 truncate block" title={animal.dam_id || 'Unknown'}>{animal.dam_id ? animal.dam_id.substring(0,8)+'...' : 'Unknown'}</span>
+                        </div>
+                      </div>
+                      <div className="pt-2 border-t border-slate-100">
+                        <span className="block text-[9px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1 mb-1"><MapPin size={10} /> Origin / Acquisition</span>
+                        <span className="text-sm font-bold text-slate-800 block">{animal.origin || 'Unknown Source'}</span>
+                        <span className="text-xs text-slate-500 font-medium">{animal.acquisition_date ? new Date(animal.acquisition_date).toLocaleDateString() : 'No date'} ({animal.acquisition_type || 'Unknown Type'})</span>
+                      </div>
                     </div>
                   </div>
+
                 </div>
               </div>
             )}
-            {activeTab === 'medical' && <MedicalRecords animalId={animal.id} />}
+
             {activeTab === 'husbandry' && <HusbandryLogs animalId={animal.id} animal={animal} />}
+            
+            {activeTab === 'events' && (
+              <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3">
+                <CalendarDays size={32} className="opacity-40" />
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Events Engine</h3>
+                <p className="text-[10px] font-bold mt-1 text-center">Module pending installation. Will display displays, interactions, and public events.</p>
+              </div>
+            )}
+
+            {activeTab === 'training' && (
+              <div className="flex flex-col items-center justify-center py-20 text-slate-400 gap-3">
+                <Target size={32} className="opacity-40" />
+                <h3 className="text-xs font-black uppercase tracking-widest text-slate-500">Behavioral Training</h3>
+                <p className="text-[10px] font-bold mt-1 text-center">Module pending installation. Will log conditioning, flight weights, and behavioral notes.</p>
+              </div>
+            )}
+
           </div>
         </div>
       </div>
@@ -228,5 +325,4 @@ export function AnimalProfile({ animalId, id, animal: passedAnimal, onBack, onCl
   );
 }
 
-// Dual Export fallback
 export default AnimalProfile;
