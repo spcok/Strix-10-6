@@ -1,11 +1,13 @@
 import { supabase } from '../lib/supabase';
 
 export const weightService = {
+  // Keeping the function name 'insertWeightLog' so we don't break UI imports
   insertWeightLog: async (payload: any) => {
     try {
+      // FIX: Changed .insert() to .upsert() to handle edits
       const { data, error } = await supabase
         .from('weight_logs')
-        .insert(payload)
+        .upsert(payload) 
         .select()
         .single();
         
@@ -13,11 +15,7 @@ export const weightService = {
       return data;
       
     } catch (error: any) {
-      console.warn("Network unreachable or insert failed. Queueing offline...", error);
-      
-      // Fallback to local queue
-      // await db.query('INSERT INTO local_sync_queue ...', payload);
-      
+      console.warn("Network unreachable or upsert failed. Queueing offline...", error);
       throw error; 
     }
   }

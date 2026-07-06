@@ -16,15 +16,53 @@ const getLocalDateString = () => {
   return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0');
 };
 
+// ============================================================================
+// PERFORMANCE: Unified Dashboard Weight Display Engine
+// ============================================================================
+const GRAMS_PER_OZ = 28.349523125;
+
 export const formatWeightDisplay = (grams: number | null | undefined, unit: string) => {
   if (!grams) return null;
-  if (unit === 'kg') return `${(grams / 1000).toFixed(2)}kg`;
+  
+  if (unit === 'kg') return `${(grams / 1000).toFixed(3)}kg`;
+  
+  if (unit === 'lb') {
+    const totalOunces = grams / GRAMS_PER_OZ;
+    let totalOzInt = Math.floor(totalOunces);
+    let e = Math.round((totalOunces - totalOzInt) * 8);
+    
+    if (e >= 8) { totalOzInt += 1; e = 0; }
+    
+    const lb = Math.floor(totalOzInt / 16);
+    const oz = totalOzInt % 16;
+    
+    let str = '';
+    if (lb > 0) str += `${lb}lb `;
+    if (oz > 0 || e > 0) str += `${oz}`;
+    if (e > 0) str += ` ${e}/8`;
+    if (oz > 0 || e > 0) str += 'oz';
+    
+    return str.trim() || '0lb';
+  }
+  
+  if (unit === 'oz') {
+    const totalOunces = grams / GRAMS_PER_OZ;
+    let totalOzInt = Math.floor(totalOunces);
+    let e = Math.round((totalOunces - totalOzInt) * 8);
+    
+    if (e >= 8) { totalOzInt += 1; e = 0; }
+    
+    let str = `${totalOzInt}`;
+    if (e > 0) str += ` ${e}/8`;
+    return `${str}oz`;
+  }
+
   return `${Math.round(grams)}g`;
 };
 
-// ------------------------------------------------------------------
-// QUERIES
-// ------------------------------------------------------------------
+// ============================================================================
+// QUERIES: Strictly mapped to new telemetry tables
+// ============================================================================
 const getAnimalsOptions = () => queryOptions({
   queryKey: ['animals', 'dashboard'],
   queryFn: async () => {
@@ -43,7 +81,7 @@ const getFeedLogsOptions = (date: string) => queryOptions({
     const { data } = await supabase.from('feed_logs').select('*').gte('recorded_at', start).lte('recorded_at', end).order('recorded_at', { ascending: true });
     return data || [];
   },
-  placeholderData: keepPreviousData 
+  placeholderData: keepPreviousData // UX Polish: Prevents screen flashing on date change
 });
 
 const getWeightLogsOptions = (date: string) => queryOptions({
@@ -100,6 +138,7 @@ const DYNAMIC_GRID_COLS = "lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_m
 export function DailyLogsPage() {
   const queryClient = useQueryClient();
   
+  // DUAL-STATE DATE ENGINE: Isolates DOM typing from query firing
   const [activeDate, setActiveDate] = useState<string>(getLocalDateString());
   const [inputDate, setInputDate] = useState<string>(getLocalDateString());
   const [activeSection, setActiveSection] = useState<string>('ALL');
@@ -128,10 +167,9 @@ export function DailyLogsPage() {
   const isError = errFeeds || errWeights || errTemps;
 
   // ============================================================================
-  // ARCHITECTURE UPGRADE: Hash Maps for O(1) Data Stitching (Kills the Freeze)
+  // HASH MAP O(1) ENGINE: Eliminates render loop freezing
   // ============================================================================
   const filteredWorksheetRecords = useMemo<WorksheetRecord[]>(() => {
-    // 1. Create Data Dictionaries (Loops logs only ONCE)
     const feedMap = new Map<string, any[]>();
     feedLogs.forEach(f => {
       if (!feedMap.has(f.animal_id)) feedMap.set(f.animal_id, []);
@@ -148,7 +186,6 @@ export function DailyLogsPage() {
       if (!tempMap.has(t.animal_id)) tempMap.set(t.animal_id, t);
     });
 
-    // 2. Filter and Map Animals (Loops animals only ONCE, instantly grabbing data from maps)
     return animals
       .filter(a => {
         if (a.status === 'ARCHIVED') return false;
@@ -285,7 +322,8 @@ export function DailyLogsPage() {
   
   const rowVirtualizer = useWindowVirtualizer({
     count: rows.length,
-    estimateSize: () => (typeof window !== 'undefined' && window.innerWidth >= 1024) ? 80 : 190,
+    // UX Polish: Locked static height removes layout thrashing on scroll
+    estimateSize: () => 80, 
     overscan: 5,
   });
 
@@ -301,6 +339,7 @@ export function DailyLogsPage() {
               <h1 className="text-2xl font-black text-slate-900 tracking-tight">Husbandry Worksheet</h1>
               <p className="text-sm font-bold text-slate-500 mt-1">Daily operations and telemetry tracking</p>
             </div>
+            {/* UX Polish: Subtle loading state while table remains mounted */}
             {isFetchingLogs && <Loader2 className="animate-spin text-emerald-500 ml-2" size={24} />}
           </div>
           

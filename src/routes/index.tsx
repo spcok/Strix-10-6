@@ -11,7 +11,6 @@ export const Route = createFileRoute('/')({
       queryClient.ensureQueryData({
         queryKey: ['animals', 'dashboard'],
         queryFn: async () => {
-          // Pulled the full object so downstream components have access to names
           const { data, error } = await supabase.from('animals').select('*');
           if (error) throw error;
           return data;
@@ -25,20 +24,6 @@ export const Route = createFileRoute('/')({
             .from('feeding_schedules')
             .select('*')
             .eq('scheduled_date', today)
-            .eq('is_deleted', false);
-          if (error) throw error;
-          return data;
-        },
-      }),
-
-      queryClient.ensureQueryData({
-        queryKey: ['daily_logs', 'dashboard', today],
-        queryFn: async () => {
-          const { data, error } = await supabase
-            .from('daily_logs')
-            .select('*')
-            .gte('log_date', `${today}T00:00:00Z`)
-            .lte('log_date', `${today}T23:59:59Z`)
             .eq('is_deleted', false);
           if (error) throw error;
           return data;
