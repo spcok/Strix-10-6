@@ -216,7 +216,8 @@ export function Dashboard() {
               </div>
             }
             <div className="flex flex-wrap items-center gap-x-2 gap-y-1 min-w-0 w-full pt-1.5 lg:pt-0">
-              <button onClick={() => setSelectedAnimalId(info.row.original.id)} className="font-black text-slate-900 text-sm leading-tight hover:text-emerald-600 hover:underline text-left transition-colors truncate max-w-full">
+              {/* FIX: Swapped 'truncate max-w-full' for 'whitespace-normal break-words' to prevent long names clipping */}
+              <button onClick={() => setSelectedAnimalId(info.row.original.id)} className="font-black text-slate-900 text-sm leading-tight hover:text-emerald-600 hover:underline text-left transition-colors whitespace-normal break-words">
                 {info.getValue() || (isGroup ? 'Unnamed Group' : 'Unnamed Animal')}
               </button>
               {info.row.original.record_type === 'GROUP' && <span className="text-[9px] font-bold text-slate-400 uppercase tracking-widest bg-slate-50 px-1.5 py-0.5 rounded border border-slate-200 shrink-0">Mob</span>}
@@ -242,7 +243,6 @@ export function Dashboard() {
       cell: info => (
         <span className="text-[10px] font-black text-slate-600 uppercase tracking-widest flex items-center gap-1.5 bg-slate-100 px-2.5 py-1.5 rounded-lg w-fit border border-slate-200 shadow-sm">
           <MapPin size={12} className="text-slate-400 shrink-0" />
-          {/* Removed 'truncate' from the text span to allow long locations to wrap */}
           <span>{(info.row.original as any).location || 'Unknown Enclosure'}</span>
         </span>
       )
@@ -361,15 +361,15 @@ export function Dashboard() {
 
   const categories = ['ALL', 'OWL', 'RAPTOR', 'MAMMAL', 'EXOTIC', 'ARCHIVED'];
 
-  // REBALANCED COLUMN WIDTHS FOR WIDE SCREENS
+  // COLUMN WIDTH ADJUSTMENTS
   const tableGridCols = useMemo(() => {
     return table.getVisibleLeafColumns().map(c => {
-      // Significantly shrunk Name, Expanded Location and Feeds
-      if (c.id === 'name') return 'minmax(160px, 1.2fr)';
+      // FIX: Slightly widened the Name minimum width from 160px up to 200px
+      if (c.id === 'name') return 'minmax(200px, 1.5fr)';
       if (c.id === 'species') return 'minmax(100px, 1fr)';
-      if (c.id === 'location') return 'minmax(140px, 1.2fr)'; // Wider minimum to accommodate text
+      if (c.id === 'location') return 'minmax(140px, 1.2fr)';
       if (c.id === 'weight') return 'minmax(110px, 1fr)';
-      if (c.id === 'todays_feed' || c.id === 'last_feed' || c.id === 'next_feed') return 'minmax(180px, 2fr)'; // Very wide to fit complex text
+      if (c.id === 'todays_feed' || c.id === 'last_feed' || c.id === 'next_feed') return 'minmax(180px, 2fr)';
       if (c.id === 'temperature') return 'minmax(110px, 1fr)';
       return 'minmax(100px, 1fr)';
     }).join(' ');
@@ -495,7 +495,6 @@ export function Dashboard() {
                         className={`hidden lg:grid gap-4 px-6 py-4 items-center transition-colors hover:bg-emerald-50/30 border-b border-slate-100 ${row.original.record_type === 'GROUP' ? 'bg-slate-50/50' : 'bg-white'}`}
                         style={{ gridTemplateColumns: tableGridCols }}
                       >
-                        {/* We removed the explicit 'truncate' class from this wrapper so location can safely wrap if needed */}
                         {row.getVisibleCells().map(cell => (
                           <div key={cell.id} className="flex flex-col justify-center min-w-0 h-full w-full">
                             {flexRender(cell.column.columnDef.cell, cell.getContext())}
