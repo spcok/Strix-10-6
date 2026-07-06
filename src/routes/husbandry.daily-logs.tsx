@@ -1,7 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, queryOptions, useQueryClient, keepPreviousData } from '@tanstack/react-query';
-import { useWindowVirtualizer } from '@tanstack/react-virtual';
 import { useReactTable, getCoreRowModel, flexRender, ColumnDef } from '@tanstack/react-table';
 import { Scale, Thermometer, ChevronLeft, ChevronRight, Plus, Loader2, AlertCircle } from 'lucide-react';
 import { supabase } from '../lib/supabase';
@@ -320,13 +319,6 @@ export function DailyLogsPage() {
   const table = useReactTable({ data: filteredWorksheetRecords, columns, getCoreRowModel: getCoreRowModel() });
   const { rows } = table.getRowModel();
   
-  const rowVirtualizer = useWindowVirtualizer({
-    count: rows.length,
-    // UX Polish: Locked static height removes layout thrashing on scroll
-    estimateSize: () => 80, 
-    overscan: 5,
-  });
-
   if (loadingAnimals) return <div className="p-8 flex justify-center text-slate-400"><Loader2 className="animate-spin" /></div>;
   if (isError) return <div className="p-8 text-red-500 flex flex-col items-center gap-2"><AlertCircle /><p className="font-bold">Failed to load telemetry data.</p></div>;
 
@@ -393,36 +385,21 @@ export function DailyLogsPage() {
             ))}
           </div>
 
-          <div style={{ height: `${rowVirtualizer.getTotalSize()}px`, width: '100%', position: 'relative' }}>
-            {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-              const row = rows[virtualRow.index];
-              return (
-                <div
-                  key={row.id}
-                  data-index={virtualRow.index}
-                  ref={rowVirtualizer.measureElement}
-                  style={{
-                    position: 'absolute',
-                    top: 0,
-                    left: 0,
-                    width: '100%',
-                    transform: `translateY(${virtualRow.start}px)`,
-                  }}
-                  className="w-full"
-                >
-                  <div className="bg-white border-b border-slate-100 p-4 lg:py-4 lg:px-6 hover:bg-slate-50/50 transition-colors flex flex-col lg:grid lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_minmax(160px,1.5fr)_minmax(320px,3fr)] gap-6 lg:items-center">
-                    {row.getVisibleCells().map(cell => (
-                      <div key={cell.id} className="w-full">
-                        <div className="lg:hidden text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
-                          {flexRender(cell.column.columnDef.header, cell.getContext())}
-                        </div>
-                        {flexRender(cell.column.columnDef.cell, cell.getContext())}
+          <div className="flex flex-col w-full pb-20">
+            {rows.map((row) => (
+              <div key={row.id} className="w-full border-b border-slate-200 shadow-sm sm:shadow-none sm:border-b sm:border-slate-100 mb-3 sm:mb-0">
+                <div className="bg-white p-4 lg:py-4 lg:px-6 hover:bg-slate-50/50 transition-colors flex flex-col lg:grid lg:grid-cols-[minmax(200px,2fr)_minmax(160px,1.5fr)_minmax(160px,1.5fr)_minmax(320px,3fr)] gap-6 lg:items-center rounded-2xl sm:rounded-none">
+                  {row.getVisibleCells().map(cell => (
+                    <div key={cell.id} className="w-full">
+                      <div className="lg:hidden text-[10px] font-black uppercase tracking-widest text-slate-400 mb-2">
+                        {flexRender(cell.column.columnDef.header, cell.getContext())}
                       </div>
-                    ))}
-                  </div>
+                      {flexRender(cell.column.columnDef.cell, cell.getContext())}
+                    </div>
+                  ))}
                 </div>
-              );
-            })}
+              </div>
+            ))}
           </div>
         </div>
       </div>
