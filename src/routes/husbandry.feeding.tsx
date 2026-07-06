@@ -5,6 +5,7 @@ import { useForm } from '@tanstack/react-form';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { CalendarClock, Plus, Trash2, Loader2, Utensils, RefreshCw, Calendar as CalIcon, Filter } from 'lucide-react';
 import { format, addDays, parseISO } from 'date-fns';
+import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { Animal, FeedingSchedule as FeedingScheduleType, OperationalList } from '../types';
@@ -45,9 +46,14 @@ const getSchedulesOptions = () => queryOptions({
 });
 
 const getFoodOptions = () => queryOptions({
-  queryKey: ['operational_lists', 'FOOD_TYPE'],
+  queryKey: ['operational_lists', 'food_type'],
   queryFn: async () => {
-    const { data, error } = await supabase.from('operational_lists').select('*').eq('category', 'FOOD_TYPE').eq('is_deleted', false);
+    const { data, error } = await supabase
+      .from('operational_lists')
+      .select('*')
+      .ilike('category', 'food_type')
+      .eq('is_deleted', false)
+      .order('name');
     if (error) throw error;
     return data as OperationalList[];
   },
@@ -62,9 +68,7 @@ const getFoodOptions = () => queryOptions({
 // ------------------------------------------------------------------
 export const Route = createFileRoute('/husbandry/feeding')({
   loader: async ({ context: { queryClient } }) => {
-    // @ts-ignore
     if (queryClient) {
-      // @ts-ignore
       await Promise.all([
         queryClient.ensureQueryData(getAnimalsOptions()),
         queryClient.ensureQueryData(getSchedulesOptions()),
@@ -91,9 +95,6 @@ export function FeedingSchedulePage() {
   const [filterAnimalId, setFilterAnimalId] = useState<string>('ALL');
   const [viewLayout, setViewLayout] = useState<'individual' | 'grouped'>('individual');
 
-  // ------------------------------------------------------------------
-  // SUPABASE REALTIME CACHE INVALIDATION (GHOST RECORD FIX)
-  // ------------------------------------------------------------------
   useEffect(() => {
     const channel = supabase
       .channel('feeding-db-changes')
@@ -101,7 +102,6 @@ export function FeedingSchedulePage() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'feeding_schedules' },
         (payload) => {
-          console.log('[Sync Engine] External mutation detected. Purging local cache:', payload);
           queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
         }
       )
@@ -121,7 +121,13 @@ export function FeedingSchedulePage() {
       if (!user?.id) throw new Error('Unauthorized');
       await feedingService.deleteSchedule(scheduleId, user.id);
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+      toast.success('Schedule deleted.');
+    },
+    onError: (err: any) => {
+      toast.error(`Deletion failed: ${err.message}`);
+    }
   });
 
   const deleteGroupMutation = useMutation({
@@ -129,12 +135,25 @@ export function FeedingSchedulePage() {
       if (!user?.id) throw new Error('Unauthorized');
       await Promise.all(scheduleIds.map(id => feedingService.deleteSchedule(id, user.id)));
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] })
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+      toast.success('Schedules deleted.');
+    },
+    onError: (err: any) => {
+      toast.error(`Group deletion failed: ${err.message}`);
+    }
   });
 
   const filteredAnimals = useMemo(() => 
     animals.filter(a => (a.category || '').toUpperCase() === activeTab),
   [animals, activeTab]);
+
+  // FIX: Added a parallel filter for the Operational Lists to match the animal category tab
+  const filteredFoodOptions = useMemo(() => 
+    foodOptions.filter((f: any) => 
+      !f.animal_category || String(f.animal_category).toUpperCase().includes(activeTab)
+    ),
+  [foodOptions, activeTab]);
 
   const upcomingSchedules = useMemo(() => 
     [...schedules].sort((a, b) => a.scheduled_date.localeCompare(b.scheduled_date)),
@@ -184,6 +203,7 @@ export function FeedingSchedulePage() {
       occurrences: 5
     },
     onSubmit: async ({ value }) => {
+      try {
         let datesToSchedule: string[] = [];
 
         if (value.schedule_mode === 'single') {
@@ -212,21 +232,22 @@ export function FeedingSchedulePage() {
         if (!user?.id) return;
         await feedingService.bulkCreateSchedules(newSchedules as any, user.id);
         queryClient.invalidateQueries({ queryKey: ['feeding_schedules'] });
+        toast.success('Feeding schedule generated!');
         form.reset();
+      } catch (err: any) {
+        toast.error(`Generation failed: ${err.message}`);
+      }
     }
   });
 
   const inputClass = "w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-xs font-bold text-slate-900 focus:outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 transition-all shadow-sm";
 
-  // ------------------------------------------------------------------
-  // 4. VIRTUALIZER ENGINE (DOM PROTECTION WITHOUT UI/UX SHIFT)
-  // ------------------------------------------------------------------
   const activeList = viewLayout === 'individual' ? displayedSchedules : groupedSchedules;
 
   const rowVirtualizer = useVirtualizer({
     count: activeList.length,
     getScrollElement: () => scrollParentRef.current,
-    estimateSize: () => 64, // Approximate row height
+    estimateSize: () => 64,
     overscan: 5,
   });
 
@@ -257,7 +278,7 @@ export function FeedingSchedulePage() {
            <div className="flex overflow-x-auto scrollbar-hide bg-slate-50 p-1.5 rounded-xl gap-1 mb-5 border border-slate-200">
               {categories.map(cat => (
                   <button 
-                      key={cat} onClick={() => { setActiveTab(cat); form.setFieldValue('animal_id', ''); }}
+                      key={cat} onClick={() => { setActiveTab(cat); form.setFieldValue('animal_id', ''); form.setFieldValue('food_type', ''); }}
                       className={`flex-1 min-w-[70px] py-2 text-[10px] font-black uppercase tracking-widest rounded-lg transition-all ${activeTab === cat ? 'bg-white text-emerald-700 border border-emerald-200 shadow-sm' : 'text-slate-500 hover:text-slate-900 hover:bg-slate-200/50'}`}
                   >
                       {cat}
@@ -290,10 +311,11 @@ export function FeedingSchedulePage() {
                         <form.Field name="food_type" children={(field) => (
                             <div>
                                 <label className="block text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1.5 ml-1">Food Type *</label>
-                                {foodOptions.length > 0 ? (
+                                {/* FIX: Dropdown now uses filteredFoodOptions strictly bound to the active tab */}
+                                {filteredFoodOptions.length > 0 ? (
                                     <select value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} disabled={loadingFood} required>
                                         <option value="">{loadingFood ? 'Loading...' : 'Select...'}</option>
-                                        {foodOptions.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
+                                        {filteredFoodOptions.map(f => <option key={f.id} value={f.name}>{f.name}</option>)}
                                     </select>
                                 ) : (
                                     <input value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass} placeholder="E.g. Mice" required />
