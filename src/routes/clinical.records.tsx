@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient, queryOptions } from '@tanstack/react-query';
 import { useForm } from '@tanstack/react-form';
@@ -9,7 +9,26 @@ import { format, parseISO } from 'date-fns';
 import { Stethoscope, X, Search, Loader2 } from 'lucide-react';
 
 // ------------------------------------------------------------------
-// 1. STRICT V3 SCHEMA ALIGNMENT
+// UI FORMATTERS
+// ------------------------------------------------------------------
+const ROLE_MAP: Record<string, string> = {
+  'VOLUNTEER': 'Volunteer',
+  'KEEPER': 'Keeper',
+  'SENIOR_KEEPER': 'Senior Keeper',
+  'HEAD_KEEPER_VOLUNTEER': 'Head Keeper/Volunteer',
+  'OWNER_DIRECTOR': 'Owner Director'
+};
+
+const RECORD_TYPE_MAP: Record<string, string> = {
+  'ROUTINE_CHECK': 'Routine Check',
+  'ILLNESS': 'Illness',
+  'INJURY': 'Injury',
+  'SURGERY': 'Surgery',
+  'FOLLOW_UP': 'Follow Up'
+};
+
+// ------------------------------------------------------------------
+// STRICT V3 SCHEMA ALIGNMENT
 // ------------------------------------------------------------------
 const ClinicalRecordSchema = z.object({
   animal_id: z.string().uuid("Animal selection is required."),
@@ -18,7 +37,6 @@ const ClinicalRecordSchema = z.object({
   encounter_type: z.string().optional().nullable(),
   weight_grams: z.number().min(0, "Weight is required."),
   
-  // SOAP Format (Required NOT NULL by V3)
   soap_subjective: z.string().min(1, "Subjective observation is required."),
   soap_objective: z.string().min(1, "Objective observation is required."),
   soap_assessment: z.string().min(1, "Assessment is required."),
@@ -32,14 +50,13 @@ const ClinicalRecordSchema = z.object({
 });
 
 // ------------------------------------------------------------------
-// 2. BULLETPROOF QUERY OPTIONS
+// BULLETPROOF QUERY OPTIONS
 // ------------------------------------------------------------------
 const clinicalRecordsOptions = queryOptions({
   queryKey: ['clinical_records'],
   queryFn: async () => {
     const { data, error } = await supabase
       .from('clinical_records')
-      // FIX: Removed the users join to prevent foreign key/column crashes
       .select('*, animals(name, species)')
       .eq('is_deleted', false)
       .order('record_date', { ascending: false });
@@ -62,7 +79,6 @@ const activeAnimalsOptions = queryOptions({
 const activeUsersOptions = queryOptions({
   queryKey: ['active_users'],
   queryFn: async () => {
-    // FIX: Select all columns to completely avoid the "column does not exist" crash
     const { data, error } = await supabase.from('users').select('*');
     if (error) throw error;
     return data || [];
@@ -83,7 +99,7 @@ export const Route = createFileRoute('/clinical/records')({
 });
 
 // ------------------------------------------------------------------
-// 3. THE COMPLIANT MODAL
+// THE COMPLIANT MODAL
 // ------------------------------------------------------------------
 function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void, animals: any[], users: any[] }) {
   const queryClient = useQueryClient();
@@ -113,7 +129,7 @@ function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void,
       soap_objective: '',
       soap_assessment: '',
       soap_plan: '',
-      conductor_role: 'INTERNAL_VET',
+      conductor_role: 'KEEPER',
       conducted_by: authUser?.id || '',
       external_vet_name: '',
       external_vet_clinic: ''
@@ -176,12 +192,13 @@ function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void,
 
             <form.Field name="encounter_type" children={(field) => (
               <div>
-                <label className={labelClass}>Encounter Type *</label>
+                <label className={labelClass}>Record Type *</label>
                 <select required value={field.state.value || ''} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
                   <option value="ROUTINE_CHECK">Routine Check</option>
-                  <option value="ILLNESS_INJURY">Illness / Injury</option>
+                  <option value="ILLNESS">Illness</option>
+                  <option value="INJURY">Injury</option>
                   <option value="SURGERY">Surgery</option>
-                  <option value="FOLLOW_UP">Follow Up</option>
+                  <option value="FOLLOW_UP">Follow up</option>
                 </select>
               </div>
             )}/>
@@ -193,7 +210,6 @@ function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void,
                   <option value="">-- Select Staff --</option>
                   {users.map((u: any) => (
                     <option key={u.id} value={u.id}>
-                      {/* FIX: Safely parse whatever naming column your schema uses */}
                       {u.name || u.full_name || u.email || u.id}
                     </option>
                   ))}
@@ -205,10 +221,11 @@ function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void,
               <div>
                 <label className={labelClass}>Conductor Role *</label>
                 <select required value={field.state.value} onBlur={field.handleBlur} onChange={e => field.handleChange(e.target.value)} className={inputClass}>
-                  <option value="INTERNAL_VET">Internal Vet</option>
-                  <option value="EXTERNAL_VET">External Vet</option>
+                  <option value="VOLUNTEER">Volunteer</option>
                   <option value="KEEPER">Keeper</option>
-                  <option value="CURATOR">Curator</option>
+                  <option value="SENIOR_KEEPER">Senior Keeper</option>
+                  <option value="HEAD_KEEPER_VOLUNTEER">Head Keeper/Volunteer</option>
+                  <option value="OWNER_DIRECTOR">Owner Director</option>
                 </select>
               </div>
             )}/>
@@ -264,7 +281,7 @@ function ClinicalRecordModal({ onClose, animals, users }: { onClose: () => void,
 }
 
 // ------------------------------------------------------------------
-// 4. MAIN PAGE RENDERER
+// MAIN PAGE RENDERER
 // ------------------------------------------------------------------
 export function ClinicalRecordsPage() {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -285,7 +302,7 @@ export function ClinicalRecordsPage() {
   }, [records, searchQuery]);
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-32">
+    <div className="max-w-7xl mx-auto space-y-6 pb-32 px-2 md:px-0">
       <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
         <div>
           <h1 className="text-2xl font-black text-slate-900 uppercase tracking-tight flex items-center gap-3">
@@ -327,7 +344,7 @@ export function ClinicalRecordsPage() {
                   <th className="px-6 py-4 w-40">Date</th>
                   <th className="px-6 py-4 w-48">Patient</th>
                   <th className="px-6 py-4">Assessment / Plan</th>
-                  <th className="px-6 py-4 w-48">Encounter</th>
+                  <th className="px-6 py-4 w-48">Record Type</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
@@ -335,9 +352,8 @@ export function ClinicalRecordsPage() {
                   <tr><td colSpan={4} className="p-12 text-center text-xs font-black text-slate-400 uppercase tracking-widest">No clinical records found.</td></tr>
                 ) : (
                   filteredRecords.map((r: any) => {
-                    // FIX: Safe in-memory user matching
                     const conductor = users.find((u: any) => u.id === r.conducted_by);
-                    const conductorName = conductor ? (conductor.name || conductor.full_name || conductor.email || 'Staff') : r.conductor_role?.replace('_', ' ');
+                    const conductorName = conductor ? (conductor.name || conductor.full_name || conductor.email || 'Staff') : (ROLE_MAP[r.conductor_role] || r.conductor_role?.replace(/_/g, ' '));
 
                     return (
                       <tr key={r.id} className="hover:bg-slate-50 transition-colors">
@@ -353,7 +369,9 @@ export function ClinicalRecordsPage() {
                           <p className="text-[11px] font-medium text-slate-600 line-clamp-2 mt-1"><span className="text-teal-600 mr-1">P:</span>{r.soap_plan}</p>
                         </td>
                         <td className="px-6 py-4 align-top">
-                          <span className="text-[9px] font-bold text-slate-700 uppercase tracking-widest bg-slate-100 px-2 py-1 rounded inline-block">{r.encounter_type?.replace('_', ' ') || 'CLINICAL'}</span>
+                          <span className="text-[9px] font-bold text-slate-700 uppercase tracking-widest bg-slate-100 px-2 py-1 rounded inline-block">
+                            {RECORD_TYPE_MAP[r.encounter_type] || r.encounter_type?.replace(/_/g, ' ') || 'CLINICAL'}
+                          </span>
                           <span className="block text-[9px] font-bold text-slate-400 uppercase tracking-widest mt-2">
                             {conductorName}
                           </span>
