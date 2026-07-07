@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ArrowLeftRight, Search, MapPin, Loader2, FileDown, Trash2, AlertTriangle } from 'lucide-react';
+import { ArrowLeftRight, Search, MapPin, Loader2, FileDown, Trash2 } from 'lucide-react';
 import { format, parseISO } from 'date-fns';
 import { toast } from 'sonner';
 import { supabase } from '../lib/supabase';
@@ -19,9 +19,6 @@ export function InternalMovementsPage() {
   const queryClient = useQueryClient();
   const [globalFilter, setGlobalFilter] = useState('');
   
-  // Custom Modal State for Deletion
-  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
-  
   // Date Filtering State (Default: Last 30 Days)
   const [endDate, setEndDate] = useState<string>(getLocalDateString(new Date()));
   const [startDate, setStartDate] = useState<string>(() => {
@@ -30,14 +27,14 @@ export function InternalMovementsPage() {
     return getLocalDateString(d);
   });
 
-  // 1. DATA FETCHING 
+  // 1. DATA FETCHING (Now governed by the Date Controls)
   const { data: movements = [], isLoading, error } = useQuery({
     queryKey: ['internal_movements', startDate, endDate],
     queryFn: async () => {
       const { data, err } = await supabase
         .from('internal_movements')
         .select('id, movement_date, from_location, to_location, animals(id, name, species)')
-        .eq('is_deleted', false)
+        .eq('is_deleted', false) // Ensures we don't fetch soft-deleted rows
         .gte('movement_date', `${startDate}T00:00:00Z`)
         .lte('movement_date', `${endDate}T23:59:59.999Z`)
         .order('movement_date', { ascending: false });
@@ -60,7 +57,7 @@ export function InternalMovementsPage() {
     return () => { supabase.removeChannel(channel); };
   }, [queryClient]);
 
-  // 3. SOFT DELETE MUTATION 
+  // 3. SOFT DELETE MUTATION (This fixes the delete issue)
   const deleteMutation = useMutation({
     mutationFn: async (id: string) => {
       const { error } = await supabase
@@ -72,11 +69,9 @@ export function InternalMovementsPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['internal_movements'] });
       toast.success('Movement record deleted successfully.');
-      setDeleteConfirmId(null); // Close modal on success
     },
     onError: (err: any) => {
       toast.error(`Deletion failed: ${err.message}`);
-      setDeleteConfirmId(null);
     }
   });
 
@@ -93,7 +88,7 @@ export function InternalMovementsPage() {
   }, [movements, globalFilter]);
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6 pb-20 px-2 sm:px-0 relative">
+    <div className="max-w-7xl mx-auto space-y-6 pb-20 px-2 sm:px-0">
       
       {/* HEADER SECTION */}
       <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-4 bg-white p-4 sm:p-6 rounded-3xl border border-slate-200 shadow-sm relative overflow-hidden">
@@ -176,6 +171,7 @@ export function InternalMovementsPage() {
                     </td>
                     <td className="px-4 sm:px-6 py-4 align-top">
                        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-4 text-[11px] font-black text-slate-700 uppercase tracking-tight whitespace-normal">
+                         {/* FIX: Text is now allowed to fully break-words. Removed 'truncate' entirely. */}
                          <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200">
                              <MapPin size={12} className="text-slate-400 shrink-0"/>
                              <span className="text-slate-500 break-words whitespace-normal">{m.from_location || 'N/A'}</span>
@@ -188,14 +184,17 @@ export function InternalMovementsPage() {
                        </div>
                     </td>
                     <td className="px-4 sm:px-6 py-4 text-right align-top">
-                       {/* FIX: Trigger custom modal instead of window.confirm */}
                        <button 
-                         onClick={() => setDeleteConfirmId(m.id)}
+                         onClick={() => {
+                           if (window.confirm("Are you sure you want to delete this movement record?")) {
+                             deleteMutation.mutate(m.id);
+                           }
+                         }}
                          disabled={deleteMutation.isPending}
                          className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-all opacity-0 group-hover:opacity-100 disabled:opacity-50 inline-block"
                          title="Delete Record"
                        >
-                         {deleteMutation.isPending && deleteConfirmId === m.id ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                         {deleteMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
                        </button>
                     </td>
                   </tr>
@@ -205,37 +204,6 @@ export function InternalMovementsPage() {
           </table>
         </div>
       </div>
-
-      {/* CUSTOM CONFIRMATION MODAL */}
-      {deleteConfirmId && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-slate-900/40 backdrop-blur-sm animate-in fade-in duration-200">
-          <div className="bg-white rounded-3xl p-6 max-w-sm w-full shadow-2xl flex flex-col items-center text-center animate-in zoom-in-95 duration-200">
-            <div className="w-14 h-14 bg-rose-50 text-rose-600 rounded-full flex items-center justify-center mb-4 border border-rose-100">
-              <AlertTriangle size={24} />
-            </div>
-            <h3 className="text-lg font-black text-slate-900 mb-2">Delete Record?</h3>
-            <p className="text-sm font-medium text-slate-500 mb-6">
-              Are you sure you want to delete this internal movement? This action cannot be undone.
-            </p>
-            <div className="flex gap-3 w-full">
-              <button 
-                onClick={() => setDeleteConfirmId(null)} 
-                className="flex-1 py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-slate-600 bg-slate-100 hover:bg-slate-200 transition-colors"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={() => deleteMutation.mutate(deleteConfirmId)} 
-                disabled={deleteMutation.isPending}
-                className="flex-1 py-3 rounded-xl font-bold text-xs uppercase tracking-widest text-white bg-rose-600 hover:bg-rose-500 transition-colors flex items-center justify-center gap-2"
-              >
-                {deleteMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : 'Delete'}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
     </div>
   );
 }

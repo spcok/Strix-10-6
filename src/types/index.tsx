@@ -1,6 +1,7 @@
 // ============================================================================
-// HUSBANDRY & CLINICAL TYPES
+// CORE HUSBANDRY TYPES
 // ============================================================================
+
 export type AnimalCategory = 'OWL' | 'RAPTOR' | 'MAMMAL' | 'EXOTIC';
 export type AnimalStatus = 'ON_DISPLAY' | 'OFF_DISPLAY' | 'QUARANTINE' | 'MEDICAL' | 'OFFSITE' | 'ARCHIVED';
 export type RecordType = 'INDIVIDUAL' | 'GROUP';
@@ -52,136 +53,39 @@ export interface Animal {
   is_deleted?: boolean | null;
   status?: AnimalStatus | string | null;
   record_type?: RecordType | string | null;
-  archive_reason?: string | null;
-  created_at?: string;
-  updated_at?: string;
-  created_by?: string | null;
-  modified_by?: string | null;
-
-  // UI Additions
-  location_name?: string; 
-  next_feed_date?: string;
-  next_feed_note?: string;
-  subRows?: Animal[]; 
 }
 
-export interface DailyLog {
+export interface OperationalList {
   id: string;
-  animal_id: string;
-  log_type: string;
-  log_date: string;
-  notes?: string | null;
-  weight_grams?: number | null;
-  weight_unit?: string | null;
-  basking_temp_c?: number | null;
-  cool_temp_c?: number | null;
-  temperature_c?: number | null;
-  weight_not_required?: boolean | null;
-  feed_details?: any | null; // JSONB
-  is_deleted?: boolean;
-  created_by?: string | null;
-  modified_by?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface DailyRound {
-  id: string;
-  animal_id: string;
-  date: string;
-  shift: string;
-  section?: string | null;
-  completed_by?: string | null;
-  completed_at?: string | null;
+  name: string;
+  description?: string | null;
+  category: string;
   status?: string | null;
-  animal_issue_note?: string | null;
-  requires_followup?: boolean | null;
-  followup_notes?: string | null;
-  is_alive?: boolean | null;
-  water_checked?: boolean | null;
-  locks_secured?: boolean | null;
   is_deleted?: boolean;
-  created_by?: string | null;
-  modified_by?: string | null;
   created_at?: string;
   updated_at?: string;
+  _modified?: string;
+  animal_category?: string | null;
 }
 
 export interface FeedingSchedule {
   id?: string;
   animal_id: string;
   scheduled_date: string;
-  food_type?: string | null;
-  quantity?: number | null;
-  quantity_unit?: string | null;
-  status?: string | null;
-  completed_at?: string | null;
-  completed_by?: string | null;
-  notes?: string | null;
+  food_type: string;
+  quantity: number;
+  quantity_unit?: string;
+  status?: string;
   supplements?: string | null;
+  notes?: string | null;
   presentation_method?: string | null;
   is_deleted?: boolean;
-  created_by?: string | null;
-  modified_by?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface ClinicalRecord {
-  id: string;
-  animal_id: string;
-  record_type?: string | null;
-  record_date: string;
-  soap_subjective?: string | null;
-  soap_objective?: string | null;
-  soap_assessment?: string | null;
-  soap_plan?: string | null;
-  weight_grams?: number | null;
-  conductor_role?: string | null;
-  conducted_by?: string | null;
-  external_vet_name?: string | null;
-  external_vet_clinic?: string | null;
-  encounter_type?: string | null;
-  is_deleted?: boolean;
-  created_by?: string | null;
-  modified_by?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface IsolationLog {
-  id: string;
-  animal_id: string;
-  isolation_type?: string | null;
-  start_date: string;
-  end_date?: string | null;
-  reason?: string | null;
-  notes?: string | null;
-  authorized_by?: string | null;
-  is_deleted?: boolean;
-  created_by?: string | null;
-  modified_by?: string | null;
-  created_at?: string;
-  updated_at?: string;
-}
-
-// ============================================================================
-// LOGISTICS TYPES
-// ============================================================================
-export interface OperationalList {
-  id: string;
-  name: string; 
-  description?: string | null; 
-  category: string;
-  status?: string | null; 
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
+  created_by?: string;
+  modified_by?: string;
 }
 
 export interface ExternalTransfer {
-  id: string;
+  id?: string;
   animal_id: string;
   transfer_type?: string | null;
   transfer_date: string;
@@ -190,213 +94,92 @@ export interface ExternalTransfer {
   reason?: string | null;
   notes?: string | null;
   is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface InternalMovement {
-  id: string;
-  animal_id: string;
-  movement_date: string;
-  from_location?: string | null;
-  to_location?: string | null;
-  reason?: string | null;
-  notes?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
 }
 
 // ============================================================================
-// STAFF MANAGEMENT TYPES
+// V3 CLINICAL SCHEMA ALIGNMENT (Strictly Mapped to CSV)
 // ============================================================================
-export interface User {
-  id: string;
-  email?: string | null;
-  name?: string | null;
-  initials?: string | null;
-  role?: string | null;
-  phone?: string | null;
-  address?: string | null;
-  signature_url?: string | null;
-  pin?: string | null;
-  cv_url?: string | null;
-  emergency_contact_name?: string | null;
-  emergency_contact_phone?: string | null;
-  start_date?: string | null;
-  hr_notes?: string | null;
-  avatar_url?: string | null;
-  dob?: string | null;
-  end_date?: string | null;
-  is_active?: boolean | null;
-  requires_password_change?: boolean | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-}
 
-export interface Shift {
-  id: string;
-  user_id?: string | null;
-  start_time: string;
-  end_time: string;
-  assigned_area?: string | null;
-  status?: string | null;
-  notes?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-  users?: Partial<User>; // Relation
-}
+export type EncounterType = 'ROUTINE_CHECK' | 'ILLNESS_INJURY' | 'SURGERY' | 'FOLLOW_UP';
+export type ConductorRole = 'INTERNAL_VET' | 'EXTERNAL_VET' | 'KEEPER' | 'CURATOR';
+export type ScheduleStatus = 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
 
-export interface Leave {
-  id: string;
-  user_id?: string | null;
-  start_date: string;
-  end_date: string;
-  status?: string | null;
-  leave_type?: string | null;
-  reason?: string | null;
-  approved_by?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-  users?: Partial<User>; // Relation
-}
-
-export interface Timesheet {
-  id: string;
-  user_id?: string | null;
-  shift_date: string;
-  clock_in_time?: string | null;
-  clock_out_time?: string | null;
-  total_hours?: number | null;
-  status?: string | null;
-  approved_by?: string | null;
-  notes?: string | null;
-  anomaly_reason?: string | null;        // NEW FROM DB SCRIPT
-  hr_resolution_notes?: string | null;   // NEW FROM DB SCRIPT
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-  users?: any; // Relation
-}
-
-// ============================================================================
-// SAFETY & COMPLIANCE TYPES
-// ============================================================================
-export interface MaintenanceTicket {
-  id: string;
-  title?: string | null;
-  description?: string | null;
-  category?: string | null;
-  status?: string | null;
-  priority?: string | null;
-  reported_by?: string | null;
-  assigned_to?: string | null;
-  resolution_notes?: string | null;
-  due_date?: string | null;
-  location?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-}
-
-export interface SafetyDrill {
-  id: string;
-  drill_date: string;
-  drill_type?: string | null;
-  scenario_description?: string | null;
-  areas_involved?: string | null;
-  duration_seconds?: number | null;     // UPDATED FROM DB SCRIPT
-  roll_call_completed?: boolean | null; // UPDATED FROM DB SCRIPT
-  issues_observed?: string | null;      // UPDATED FROM DB SCRIPT
-  corrective_actions?: string | null;   // UPDATED FROM DB SCRIPT
-  is_simulation?: boolean | null;       // UPDATED FROM DB SCRIPT
-  status?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-}
-
-export interface FirstAidLog {
-  id: string;
-  incident_id?: string | null;
-  person_involved_name?: string | null;
-  incident_date: string;
-  person_type?: string | null;
-  treatment_provided?: string | null;
-  administered_by?: string | null;
-  injury_description?: string | null;
-  referral_needed?: boolean | null;
-  referral_details?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-}
-
-export interface Incident {
-  id: string;
-  title?: string | null;
-  incident_date: string;
-  incident_type?: string | null;
-  severity?: string | null;
-  description?: string | null;
-  immediate_action_taken?: string | null;
-  reported_by?: string | null;
-  status?: string | null;
-  resolution_notes?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-}
-
-export interface ZLADocument {
-  id: string;
-  name?: string | null;
-  category?: string | null;
-  file_url?: string | null;
-  upload_date?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
-}
-
-// ============================================================================
-// SYSTEM CONFIGURATION TYPES
-// ============================================================================
-export interface OrganizationProfile {
+export interface ClinicalRecord {
   id?: string;
-  org_name: string;
-  logo_url?: string | null;
-  contact_email?: string | null;
-  contact_phone?: string | null;
-  address?: string | null;
-  license_number?: string | null;
-  website?: string | null;
-  adoptionurl?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
+  animal_id: string;
+  record_type: string; // NOT NULL
+  record_date: string; // NOT NULL (timestamp with time zone)
+  
+  // SOAP Format (NOT NULL)
+  soap_subjective: string;
+  soap_objective: string;
+  soap_assessment: string;
+  soap_plan: string;
+  
+  weight_grams: number; // NOT NULL
+  
+  // Auditing & Conductors (NOT NULL)
+  conductor_role: ConductorRole | string;
+  conducted_by: string; // UUID of the user
+  created_by: string; // UUID of the user
+  modified_by: string; // UUID of the user
+  
+  // Optional Fields
+  external_vet_name?: string | null;
+  external_vet_clinic?: string | null;
+  encounter_type?: EncounterType | string | null;
+  is_deleted?: boolean | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+
+  // Relational joins (used by TanStack Query for rendering tables)
+  animals?: {
+    id?: string;
+    name?: string | null;
+    species?: string | null;
+  };
+  users?: {
+    first_name?: string;
+    last_name?: string;
+  };
 }
 
-export interface ExternalContact {
-  id: string;
-  name: string;
-  role: string;
-  phone?: string | null;
-  email?: string | null;
-  address?: string | null;
-  is_deleted?: boolean;
-  created_at?: string;
-  updated_at?: string;
-  _modified?: string;
+export interface ClinicalAttachment {
+  id?: string;
+  record_id: string; // UUID
+  file_name: string; // NOT NULL
+  file_type: string; // NOT NULL
+  file_url: string; // NOT NULL
+  is_deleted?: boolean | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+}
+
+export interface ClinicalSchedule {
+  id?: string;
+  animal_id: string; // UUID
+  schedule_type: string; // NOT NULL
+  medication_name: string; // NOT NULL
+  dosage: string; // NOT NULL
+  frequency: string; // NOT NULL
+  start_date: string; // NOT NULL (timestamp with time zone)
+  end_date?: string | null;
+  status: ScheduleStatus | string; // NOT NULL
+  
+  notes?: string | null;
+  instructions?: string | null;
+  
+  // Audit Fields (NOT NULL)
+  created_by: string; // UUID
+  modified_by: string; // UUID
+  
+  is_deleted?: boolean | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+
+  // Join fields for UI
+  animals?: {
+    name?: string | null;
+    species?: string | null;
+  };
 }
