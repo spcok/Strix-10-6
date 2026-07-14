@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { createRootRouteWithContext, Outlet } from '@tanstack/react-router';
+import { createRootRouteWithContext, Outlet, useLocation } from '@tanstack/react-router';
 import { QueryClient, useQueryClient } from '@tanstack/react-query';
 import { AuthProvider, useAuth } from '../lib/auth';
 import { Sidebar } from '../components/layout/Sidebar';
 import { Header } from '../components/layout/Header';
 import { LoginScreen } from '../components/auth/LoginScreen';
 import { supabase } from '../lib/supabase';
+import { toast } from 'sonner';
 
 export const Route = createRootRouteWithContext<{
   queryClient: QueryClient;
@@ -37,7 +38,8 @@ function GlobalSyncEngine() {
         const tableToKeyMap: Record<string, string[]> = {
           'daily_logs': ['daily_logs'],
           'animals': ['animals'],
-          'users': ['internal_users'],
+          'users': ['internal_users', 'userProfile'],
+          'rbac_matrix': ['rbac_matrix', 'rbac_permissions'],
           'role_permissions': ['role_permissions'],
           'external_directory': ['external_directory'],
           'safety_drills': ['safety_drills'],
@@ -61,6 +63,48 @@ function GlobalSyncEngine() {
   }, [queryClient, session]);
 
   return null;
+}
+
+// ------------------------------------------------------------------
+// ROUTE GATEKEEPER & ACCESS DEFLECTOR
+// ------------------------------------------------------------------
+function RouteGatekeeper({ children }: { children: React.ReactNode }) {
+  const { hasPermission, profile, isLocked } = useAuth();
+  const location = useLocation();
+
+  useEffect(() => {
+    if (!profile || isLocked) return;
+
+    const path = location.pathname;
+
+    // Define route protection rules mapped strictly to PERMISSION_REGISTRY keys
+    const routePermissions: Record<string, string> = {
+      '/clinical': 'clinical:read',
+      '/logistics': 'logistics:read',
+      '/staff/rota': 'hr:read',
+      '/staff/timesheets': 'hr:read',
+      '/settings/rbac': 'admin:settings',
+      '/settings/directory': 'admin:users',
+      '/safety': 'safety:read', // <-- ADDED: Absolute route protection for Safety
+    };
+
+    // Check if the current URL starts with a restricted prefix
+    const requiredPerm = Object.entries(routePermissions).find(([routePrefix]) =>
+      path.startsWith(routePrefix)
+    )?.[1];
+
+    if (requiredPerm && !hasPermission(requiredPerm)) {
+      console.warn(`[Route Gatekeeper] Access denied for path: ${path}. Missing perm: ${requiredPerm}`);
+      toast.error('Unauthorized Access: You do not have permission to view this module.');
+      
+      // Silently deflect unauthorized personnel back to safe dashboard
+      window.history.pushState({}, '', '/');
+      const navEvent = new PopStateEvent('popstate');
+      window.dispatchEvent(navEvent);
+    }
+  }, [location.pathname, profile, isLocked, hasPermission]);
+
+  return <>{children}</>;
 }
 
 // ------------------------------------------------------------------
@@ -90,7 +134,9 @@ function AuthGuard() {
       <div className="flex flex-col flex-1 overflow-hidden transition-all duration-300">
         <Header onMenuClick={() => setIsSidebarOpen(!isSidebarOpen)} />
         <main className="flex-1 overflow-auto p-6">
-          <Outlet />
+          <RouteGatekeeper>
+            <Outlet />
+          </RouteGatekeeper>
         </main>
       </div>
     </div>

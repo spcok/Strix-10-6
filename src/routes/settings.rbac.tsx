@@ -1,60 +1,71 @@
 import React from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { ShieldCheck, CheckSquare, Square, Loader2, Info } from 'lucide-react';
+import { ShieldCheck, CheckSquare, Square, Loader2 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
-import { useAuth } from '../lib/auth';
 
 export const Route = createFileRoute('/settings/rbac')({
   component: RBACMatrixPage,
 });
 
-// The available system permissions grouped by module
+// ------------------------------------------------------------------
+// EXHAUSTIVE SYSTEM PERMISSION REGISTRY
+// ------------------------------------------------------------------
 const PERMISSION_REGISTRY = [
   {
     module: 'Husbandry & Care',
     actions: [
-      { key: 'husbandry:read', label: 'View Daily Logs & Feeding' },
-      { key: 'husbandry:write', label: 'Submit Daily Logs & Feeding' },
-      { key: 'animals:write', label: 'Add/Edit Animal Profiles' },
+      { key: 'husbandry:read', label: 'View Daily Logs, Rounds & Feeding' },
+      { key: 'husbandry:write', label: 'Submit Daily Logs, Weights & Feeding' },
+      { key: 'animals:write', label: 'Add/Edit Animal Profiles & Census' },
+      { key: 'husbandry:delete', label: 'Purge Erroneous Logs & Archive Animals' },
     ]
   },
   {
     module: 'Clinical & Medical',
     actions: [
-      { key: 'clinical:read', label: 'View Medical History & Rx' },
-      { key: 'clinical:write', label: 'Log Medical Administrations' },
-      { key: 'clinical:prescribe', label: 'Issue Prescriptions / ZLA Vet' },
+      { key: 'clinical:read', label: 'View Medical History & Active MARs' },
+      { key: 'clinical:write', label: 'Log Medical Administrations & Treatments' },
+      { key: 'clinical:prescribe', label: 'Issue Prescriptions / ZLA Vet Sign-Off' },
     ]
   },
   {
-    module: 'Logistics',
+    module: 'Logistics & Movements',
     actions: [
-      { key: 'logistics:read', label: 'View Movements & Audits' },
-      { key: 'logistics:write', label: 'Request Internal Movements' },
-      { key: 'logistics:approve', label: 'Approve Internal/External Transfers' },
+      { key: 'logistics:read', label: 'View Internal Moves & Transfer Audits' },
+      { key: 'logistics:write', label: 'Request Internal Animal Movements' },
+      { key: 'logistics:approve', label: 'Approve Internal & External Transfers' },
+    ]
+  },
+  {
+    module: 'Safety & Compliance',
+    actions: [
+      { key: 'safety:read', label: 'View Incident Logs, Drills & Maintenance' },
+      { key: 'safety:write', label: 'Submit Incident Reports & Record Drills' },
+      { key: 'safety:manage', label: 'Investigate Incidents & Schedule Drills' },
+      { key: 'maintenance:write', label: 'Create, Assign & Close Maintenance Tickets' },
     ]
   },
   {
     module: 'HR & Staffing',
     actions: [
-      { key: 'hr:read', label: 'View Rotas & Staff Directory' },
-      { key: 'hr:write', label: 'Publish Rotas & Manage Timesheets' },
+      { key: 'hr:read', label: 'View Rotas, Shifts & Staff Directory' },
+      { key: 'hr:write', label: 'Publish Rotas & Draft Staff Schedules' },
+      { key: 'hr:approve', label: 'Approve Leave Requests & Finalize Timesheets' },
       { key: 'hr:sensitive', label: 'View Medical Disclosures & HR Notes' },
     ]
   },
   {
     module: 'System Administration',
     actions: [
-      { key: 'admin:users', label: 'Provision User Accounts' },
-      { key: 'admin:settings', label: 'Edit ZLA Config & DB Schema' },
+      { key: 'admin:users', label: 'Provision & Deactivate User Accounts' },
+      { key: 'admin:settings', label: 'Edit ZLA Config, Lists & DB Schema' },
     ]
   }
 ];
 
 export function RBACMatrixPage() {
   const queryClient = useQueryClient();
-  const { profile } = useAuth();
 
   const { data: matrix = [], isLoading } = useQuery({
     queryKey: ['rbac_matrix'],
@@ -73,13 +84,13 @@ export function RBACMatrixPage() {
         .eq('role', role);
       if (error) throw error;
     },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['rbac_matrix'] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['rbac_matrix'] });
+      queryClient.invalidateQueries({ queryKey: ['rbac_permissions'] }); // Hot-swaps active sessions instantly
+    },
   });
 
   const togglePermission = (role: string, currentPerms: string[], permKey: string) => {
-    // Admins always have '*' and cannot be restricted via UI to prevent locking out the system
-    if (role === 'ADMIN') return; 
-
     const updated = currentPerms.includes(permKey)
       ? currentPerms.filter(p => p !== permKey)
       : [...currentPerms, permKey];
@@ -87,20 +98,8 @@ export function RBACMatrixPage() {
     updateMutation.mutate({ role, permissions: updated });
   };
 
-  if (profile?.role !== 'ADMIN' && profile?.role !== 'DIRECTOR') {
-    return (
-      <div className="flex flex-col items-center justify-center py-20 text-slate-400">
-        <ShieldCheck size={48} className="mb-4 opacity-20" />
-        <h2 className="text-lg font-black uppercase tracking-widest">Unauthorized Area</h2>
-      </div>
-    );
-  }
-
-  // Define the strict display order for the roles in the UI columns (Left to Right)
-  const roleOrder = ['VOLUNTEER', 'KEEPER', 'SENIOR_KEEPER', 'DIRECTOR'];
-  const displayRoles = [...matrix]
-    .filter(m => m.role !== 'ADMIN')
-    .sort((a, b) => roleOrder.indexOf(a.role) - roleOrder.indexOf(b.role));
+  // Sort roles alphabetically to ensure consistent column ordering
+  const displayRoles = [...matrix].sort((a, b) => a.role.localeCompare(b.role));
 
   return (
     <div className="max-w-7xl mx-auto space-y-6 animate-in fade-in duration-300">
@@ -110,17 +109,6 @@ export function RBACMatrixPage() {
           <ShieldCheck className="text-emerald-600" size={24} /> Role-Based Access Matrix
         </h3>
         <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">Configure Granular System Permissions</p>
-      </div>
-
-      <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 flex gap-3 text-blue-800">
-        <Info size={20} className="shrink-0 mt-0.5 text-blue-500" />
-        <div className="space-y-1">
-          <p className="text-sm font-bold">Live Access Enforcement</p>
-          <p className="text-xs font-medium leading-relaxed">
-            Changes made here take effect the next time the targeted staff members launch or refresh the StrixOS app. 
-            The <b>SYSTEM ADMIN</b> role inherently possesses unrestricted root access and is hidden from this matrix to prevent accidental system lockouts.
-          </p>
-        </div>
       </div>
 
       <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
@@ -163,17 +151,14 @@ export function RBACMatrixPage() {
                         
                         {displayRoles.map(roleData => {
                           const hasPerm = roleData.permissions.includes(action.key) || roleData.permissions.includes('*');
-                          const isDirector = roleData.role === 'DIRECTOR';
                           
                           return (
                             <td key={roleData.role} className="px-6 py-4 text-center">
                               <button
                                 onClick={() => togglePermission(roleData.role, roleData.permissions, action.key)}
-                                disabled={updateMutation.isPending || isDirector}
-                                className={`inline-flex p-1.5 rounded-lg transition-all ${
-                                  isDirector ? 'opacity-50 cursor-not-allowed' : 'hover:bg-slate-100 cursor-pointer'
-                                }`}
-                                title={isDirector ? 'Director permissions are locked to prevent self-sabotage' : `Toggle ${action.key} for ${roleData.role}`}
+                                disabled={updateMutation.isPending}
+                                className="inline-flex p-1.5 rounded-lg transition-all hover:bg-slate-100 cursor-pointer"
+                                title={`Toggle ${action.key} for ${roleData.role}`}
                               >
                                 {hasPerm ? (
                                   <CheckSquare size={24} className="text-emerald-500" />

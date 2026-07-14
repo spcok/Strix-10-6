@@ -9,74 +9,98 @@ import {
   Utensils, LogOut, MapPin, ArrowRightLeft
 } from 'lucide-react';
 
-const navGroups = [
+// --- Types ---
+interface NavItem {
+  name: string;
+  to: string;
+  icon: React.ElementType;
+  requiredPermission?: string;
+}
+
+interface NavGroupData {
+  title: string;
+  icon: React.ElementType;
+  items: NavItem[];
+}
+
+// --- Navigation Registry with RBAC Mappings ---
+const navGroups: NavGroupData[] = [
   {
     title: 'Husbandry',
     icon: PawPrint,
     items: [
-      { name: 'Daily Logs', to: '/husbandry/daily-logs', icon: ClipboardList },
-      { name: 'Daily Rounds', to: '/husbandry/rounds', icon: CalendarDays },
-      { name: 'Feeding Schedule', to: '/husbandry/feeding', icon: Utensils },
+      { name: 'Daily Logs', to: '/husbandry/daily-logs', icon: ClipboardList, requiredPermission: 'husbandry:read' },
+      { name: 'Daily Rounds', to: '/husbandry/rounds', icon: CalendarDays, requiredPermission: 'husbandry:read' },
+      { name: 'Feeding Schedule', to: '/husbandry/feeding', icon: Utensils, requiredPermission: 'husbandry:read' },
     ]
   },
   {
     title: 'Logistics',
     icon: MapPin,
     items: [
-      { name: 'Internal Moves', to: '/logistics/internal-movements', icon: ArrowRightLeft },
-      { name: 'Ext. Transfers', to: '/logistics/external-transfers', icon: ArrowRightLeft },
+      { name: 'Internal Moves', to: '/logistics/internal-movements', icon: ArrowRightLeft, requiredPermission: 'logistics:read' },
+      { name: 'Ext. Transfers', to: '/logistics/external-transfers', icon: ArrowRightLeft, requiredPermission: 'logistics:read' },
     ]
   },
   {
     title: 'Clinical and Medical',
     icon: Stethoscope,
     items: [
-      { name: 'Clinical Records', to: '/clinical/records', icon: HeartPulse },
-      { name: 'Medication', to: '/clinical/medications', icon: Syringe },
-      { name: 'Quarantine and Isolation', to: '/clinical/isolation', icon: ShieldAlert },
+      { name: 'Clinical Records', to: '/clinical/records', icon: HeartPulse, requiredPermission: 'clinical:read' },
+      { name: 'Medication', to: '/clinical/medications', icon: Syringe, requiredPermission: 'clinical:read' },
+      { name: 'Quarantine and Isolation', to: '/clinical/isolation', icon: ShieldAlert, requiredPermission: 'clinical:read' },
     ]
   },
   {
     title: 'Safety and Compliance',
     icon: AlertTriangle,
     items: [
-      { name: 'First Aid', to: '/safety/first-aid', icon: BriefcaseMedical },
-      { name: 'Incidents', to: '/safety/incidents', icon: AlertTriangle },
-      { name: 'Safety Drills', to: '/safety/drills', icon: Activity },
-      { name: 'Maintenance', to: '/safety/maintenance', icon: Wrench },
+      // WIRED TO RBAC: These will now hide if the role lacks 'safety:read'
+      { name: 'First Aid', to: '/safety/first-aid', icon: BriefcaseMedical, requiredPermission: 'safety:read' },
+      { name: 'Incidents', to: '/safety/incidents', icon: AlertTriangle, requiredPermission: 'safety:read' },
+      { name: 'Safety Drills', to: '/safety/drills', icon: Activity, requiredPermission: 'safety:read' },
+      { name: 'Maintenance', to: '/safety/maintenance', icon: Wrench, requiredPermission: 'safety:read' },
     ]
   },
   {
     title: 'Staff',
     icon: Users,
     items: [
-      { name: 'Timesheets', to: '/staff/timesheets', icon: Clock },
-      { name: 'Rota', to: '/staff/rota', icon: CalendarDays },
-      { name: 'Holidays & Absence', to: '/staff/leave', icon: CalendarHeart },
-      { name: 'Missing Records', to: '/staff/missing-records', icon: FileWarning },
-      { name: 'Staff Shifts', to: '/staff/shifts', icon: Wrench },
+      { name: 'Timesheets', to: '/staff/timesheets', icon: Clock, requiredPermission: 'hr:read' },
+      { name: 'Rota', to: '/staff/rota', icon: CalendarDays, requiredPermission: 'hr:read' },
+      { name: 'Holidays & Absence', to: '/staff/leave', icon: CalendarHeart, requiredPermission: 'hr:read' },
+      { name: 'Missing Records', to: '/staff/missing-records', icon: FileWarning, requiredPermission: 'hr:read' },
+      { name: 'Staff Shifts', to: '/staff/shifts', icon: Wrench, requiredPermission: 'hr:read' },
     ]
   },
   {
     title: 'Admin',
     icon: Settings,
     items: [
-      { name: 'Reports', to: '/reports', icon: BarChart3 },
-      { name: 'Settings', to: '/settings', icon: Settings },
-      { name: 'Help', to: '/help', icon: HelpCircle },
+      { name: 'Reports', to: '/reports', icon: BarChart3, requiredPermission: 'admin:settings' },
+      { name: 'Settings', to: '/settings', icon: Settings, requiredPermission: 'admin:settings' },
+      { name: 'Help', to: '/help', icon: HelpCircle }, // Help center remains open to all users
     ]
   }
 ];
 
 interface NavGroupProps {
-  key?: string;
-  group: typeof navGroups[0];
+  group: NavGroupData;
   isOpen: boolean;
   showDivider: boolean;
 }
 
 function NavGroup({ group, isOpen, showDivider }: NavGroupProps) {
   const [isGroupOpen, setIsGroupOpen] = useState(true);
+  const { hasPermission } = useAuth();
+
+  const visibleItems = group.items.filter(
+    (item) => !item.requiredPermission || hasPermission(item.requiredPermission)
+  );
+
+  if (visibleItems.length === 0) {
+    return null;
+  }
 
   return (
     <div className="mb-2">
@@ -97,7 +121,7 @@ function NavGroup({ group, isOpen, showDivider }: NavGroupProps) {
       
       {(isGroupOpen || !isOpen) && (
         <div className="mt-1 space-y-1">
-          {group.items.map((item) => (
+          {visibleItems.map((item) => (
             <Link
               key={item.name}
               to={item.to as any}
@@ -116,10 +140,6 @@ function NavGroup({ group, isOpen, showDivider }: NavGroupProps) {
 
 export function Sidebar({ isOpen }: { isOpen: boolean }) {
   const { session, logout } = useAuth();
-
-  const handleSignOut = async () => {
-    await logout();
-  };
 
   return (
     <div className={`transition-all duration-300 shrink-0 ${isOpen ? 'w-64' : 'w-20'} bg-[#0F1117] border-r border-slate-800/80 flex flex-col h-full overflow-hidden`}>
@@ -155,7 +175,7 @@ export function Sidebar({ isOpen }: { isOpen: boolean }) {
       {session && (
         <div className="p-4 border-t border-slate-800/80 shrink-0">
           <button 
-            onClick={handleSignOut}
+            onClick={() => logout(false)}
             title={!isOpen ? "Sign Out" : undefined}
             className={`w-full flex items-center ${isOpen ? 'gap-3 px-3' : 'justify-center px-0'} py-2.5 rounded-xl text-xs font-black uppercase tracking-widest text-slate-500 hover:text-rose-400 hover:bg-rose-50 border border-transparent hover:border-rose-500/10 transition-all`}
           >
