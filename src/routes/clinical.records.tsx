@@ -1,23 +1,62 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { createFileRoute } from '@tanstack/react-router';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { 
   Stethoscope, Search, Plus, Activity, 
-  ShieldAlert, FileText, ChevronRight, X, Loader2, UserRound
+  ShieldAlert, FileText, ChevronRight, X, Loader2, UserRound, AlertCircle, CalendarClock, Scale, MapPin, Cake, ChevronDown, Trash2, Edit, Pill, AlertTriangle
 } from 'lucide-react';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { toast } from 'sonner';
 
+// Ensure this path matches your project structure exactly
+import PrescriptionFormModal from '../components/medical/PrescriptionFormModal';
+
 export const Route = createFileRoute('/clinical/records')({
   component: ClinicalRecordsModule,
 });
 
+// Helper function to calculate age and include DOB
+function formatAgeWithDOB(dob: string | null | undefined): string {
+  if (!dob) return 'Unknown Age';
+  const birthDate = new Date(dob);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  const formattedDob = birthDate.toLocaleDateString('en-GB');
+  return `${age === 0 ? '< 1 Year Old' : `${age} Years Old`} (DOB: ${formattedDob})`;
+}
+
+// 30-Day Compliance Lock Check
+function isEditable(createdAt: string): boolean {
+  const recordDate = new Date(createdAt);
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  return recordDate > thirtyDaysAgo;
+}
+
 function ClinicalRecordsModule() {
-  const { hasPermission } = useAuth();
+  const { hasPermission, profile } = useAuth();
+  const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAnimalId, setSelectedAnimalId] = useState<string | null>(null);
-  const [isModalOpen, setIsModalOpen] = useState(false);
+  
+  // Modal States
+  const [isSOAPModalOpen, setIsSOAPModalOpen] = useState(false);
+  const [isMARModalOpen, setIsMARModalOpen] = useState(false);
+  const [recordToEdit, setRecordToEdit] = useState<any | null>(null);
+  const [recordToDelete, setRecordToDelete] = useState<{ id: string, weightLogId: string | null } | null>(null);
+  const [linkedClinicalIdForMAR, setLinkedClinicalIdForMAR] = useState<string | null>(null);
+  
+  // Expanded State
+  const [expandedRecords, setExpandedRecords] = useState<Record<string, boolean>>({});
+
+  const toggleRecord = (id: string) => {
+    setExpandedRecords(prev => ({ ...prev, [id]: !prev[id] }));
+  };
 
   // --- QUERIES ---
   const { data: animals = [], isLoading: isLoadingAnimals } = useQuery({
@@ -25,8 +64,21 @@ function ClinicalRecordsModule() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('animals')
-        .select('id, name, species, ring_number, average_target_weight')
+        .select('id, name, species, ring_number, average_target_weight, date_of_birth, location')
         .eq('is_deleted', false)
+        .order('name');
+      if (error) throw error;
+      return data;
+    }
+  });
+
+  const { data: staffMembers = [], isLoading: isStaffLoading } = useQuery({
+    queryKey: ['active_staff'],
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('users')
+        .select('id, name, role')
+        .eq('is_active', true)
         .order('name');
       if (error) throw error;
       return data;
@@ -39,28 +91,95 @@ function ClinicalRecordsModule() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('clinical_records')
+        // FIX: Native PostgREST join without strict aliasing prevents silent failures
         .select(`
           *,
-          users!clinical_records_conducted_by_fkey(name, initials)
+          weight_logs(weight_grams)
         `)
         .eq('animal_id', selectedAnimalId)
         .eq('is_deleted', false)
-        .order('created_at', { ascending: false });
-      if (error) throw error;
+        .order('record_date', { ascending: false }); 
+      
+      if (error) {
+        console.error("Timeline Query Error:", error);
+        throw error;
+      }
       return data;
     }
   });
 
-  const selectedAnimal = animals.find(a => a.id === selectedAnimalId);
-  const filteredAnimals = animals.filter(a => 
-    a.name?.toLowerCase().includes(searchQuery.toLowerCase()) || 
-    a.ring_number?.toLowerCase().includes(searchQuery.toLowerCase())
-  );
+  // Check for active MARs to light up the badge
+  const { data: activeMars = [] } = useQuery({
+    queryKey: ['active_mars', selectedAnimalId],
+    enabled: !!selectedAnimalId,
+    queryFn: async () => {
+      const { data, error } = await supabase
+        .from('clinical_schedule')
+        .select('id')
+        .eq('animal_id', selectedAnimalId)
+        .eq('status', 'ACTIVE')
+        .eq('is_deleted', false);
+      if (error && error.code !== 'PGRST116') throw error;
+      return data || [];
+    }
+  });
+
+  const selectedAnimal = useMemo(() => animals.find(a => a.id === selectedAnimalId), [animals, selectedAnimalId]);
+  
+  const filteredAnimals = useMemo(() => {
+    if (!searchQuery) return animals;
+    const lowerQuery = searchQuery.toLowerCase();
+    return animals.filter(a => 
+      a.name?.toLowerCase().includes(lowerQuery) || 
+      a.ring_number?.toLowerCase().includes(lowerQuery)
+    );
+  }, [animals, searchQuery]);
+
+  // --- DELETE MUTATION ---
+  const deleteMutation = useMutation({
+    mutationFn: async ({ recordId, weightLogId }: { recordId: string, weightLogId: string | null }) => {
+      const { error: clinicalError } = await supabase
+        .from('clinical_records')
+        .update({ is_deleted: true, modified_by: profile?.id })
+        .eq('id', recordId);
+      if (clinicalError) throw clinicalError;
+
+      if (weightLogId) {
+         await supabase
+          .from('weight_logs')
+          .update({ is_deleted: true, modified_by: profile?.id })
+          .eq('id', weightLogId);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['clinical_records', selectedAnimalId] });
+      queryClient.invalidateQueries({ queryKey: ['weight_logs', selectedAnimalId] }); 
+      toast.success('Clinical record permanently deleted.');
+      setRecordToDelete(null);
+    },
+    onError: (err: Error) => toast.error(err.message)
+  });
+
+  const handleDeleteTrigger = (e: React.MouseEvent, recordId: string, weightLogId: string | null) => {
+    e.stopPropagation(); 
+    setRecordToDelete({ id: recordId, weightLogId });
+  };
+
+  const handleEditTrigger = (e: React.MouseEvent, record: any) => {
+    e.stopPropagation();
+    setRecordToEdit(record);
+    setIsSOAPModalOpen(true);
+  };
+
+  const handleOpenNewSOAP = () => {
+    setRecordToEdit(null);
+    setIsSOAPModalOpen(true);
+  };
 
   return (
-    <div className="flex h-[calc(100vh-6rem)] bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in duration-300">
+    <div className="flex h-[calc(100vh-6rem)] bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden animate-in fade-in duration-300 relative">
       
-      {/* LEFT PANEL: The Ward / Patient List */}
+      {/* LEFT PANEL: Patient Roster */}
       <div className="w-1/3 lg:w-1/4 border-r border-slate-200 flex flex-col bg-slate-50 shrink-0">
         <div className="p-4 border-b border-slate-200 bg-white">
           <h2 className="text-sm font-black text-slate-900 uppercase tracking-widest flex items-center gap-2 mb-3">
@@ -114,7 +233,7 @@ function ClinicalRecordsModule() {
           </div>
         ) : (
           <>
-            {/* 1. The Vitals Ribbon */}
+            {/* 1. The Enriched Vitals Ribbon */}
             <div className="bg-white border-b border-slate-200 p-6 shrink-0 shadow-sm z-10 relative">
               <div className="flex justify-between items-start mb-4">
                 <div>
@@ -125,7 +244,7 @@ function ClinicalRecordsModule() {
                 </div>
                 {hasPermission('clinical:write') && (
                   <button 
-                    onClick={() => setIsModalOpen(true)}
+                    onClick={handleOpenNewSOAP}
                     className="bg-emerald-500 hover:bg-emerald-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest flex items-center gap-2 transition-colors shadow-sm"
                   >
                     <Plus size={16} /> New Clinical Entry
@@ -134,17 +253,31 @@ function ClinicalRecordsModule() {
               </div>
 
               {/* Status Badges */}
-              <div className="flex gap-3">
+              <div className="flex flex-wrap gap-3">
                 <div className="flex items-center gap-2 bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200">
-                  <Activity size={14} /> Target Weight: {selectedAnimal.average_target_weight || 'N/A'}g
+                  <Cake size={14} /> {formatAgeWithDOB(selectedAnimal.date_of_birth)}
                 </div>
-                <div className="flex items-center gap-2 bg-amber-50 text-amber-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-amber-200">
-                  <ShieldAlert size={14} /> View Active MARs
+                <div className="flex items-center gap-2 bg-slate-100 text-slate-600 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200">
+                  <MapPin size={14} /> {selectedAnimal.location || 'Location Unknown'}
                 </div>
+                <div className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-emerald-200">
+                  <Activity size={14} /> Target: {selectedAnimal.average_target_weight || 'N/A'}g
+                </div>
+                
+                {/* Dynamic MAR Badge */}
+                {activeMars.length > 0 ? (
+                  <div className="flex items-center gap-2 bg-rose-50 text-rose-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-rose-200 animate-pulse cursor-pointer hover:bg-rose-100">
+                    <Pill size={14} /> {activeMars.length} Active MAR{activeMars.length > 1 ? 's' : ''}
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-2 bg-slate-50 text-slate-400 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200">
+                    <Pill size={14} /> No Active MARs
+                  </div>
+                )}
               </div>
             </div>
 
-            {/* 2. The Chronological SOAP Timeline */}
+            {/* 2. The Chronological Collapsible Timeline */}
             <div className="flex-1 overflow-y-auto custom-scrollbar p-6">
               {isLoadingRecords ? (
                 <div className="flex justify-center py-12"><Loader2 className="animate-spin text-emerald-500" size={32} /></div>
@@ -154,59 +287,147 @@ function ClinicalRecordsModule() {
                   <p className="text-xs font-black uppercase tracking-widest">No Clinical Records Found</p>
                 </div>
               ) : (
-                <div className="space-y-6 pl-4 border-l-2 border-slate-200 ml-4">
-                  {records.map((record) => (
-                    <div key={record.id} className="relative pl-6">
-                      <div className="absolute -left-[31px] top-0 w-4 h-4 rounded-full border-4 border-white bg-emerald-500 shadow-sm" />
-                      
-                      <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="space-y-4 pl-4 border-l-2 border-slate-200 ml-4">
+                  {records.map((record) => {
+                    const isExpanded = expandedRecords[record.id];
+                    const canEdit = hasPermission('clinical:write') && isEditable(record.created_at);
+                    
+                    const conductorName = record.conductor_role === 'EXTERNAL_VET'
+                      ? `Dr. ${record.external_vet_name}`
+                      : `${staffMembers.find(s => s.id === record.conducted_by)?.name || 'Staff'}`;
+                    
+                    const problemTitle = record.title || 'Clinical Evaluation';
+                    
+                    // FIX: Safe weight extraction for the timeline UI
+                    let linkedWeight = 'N/A';
+                    const wLog = record.weight_logs || record.weight;
+                    if (wLog) {
+                      if (Array.isArray(wLog) && wLog.length > 0) linkedWeight = wLog[0].weight_grams;
+                      else if (!Array.isArray(wLog) && wLog.weight_grams !== undefined) linkedWeight = wLog.weight_grams;
+                    }
+
+                    return (
+                      <div key={record.id} className="relative pl-6">
+                        <div className="absolute -left-[31px] top-4 w-4 h-4 rounded-full border-4 border-white bg-emerald-500 shadow-sm z-10" />
                         
-                        {/* Record Header */}
-                        <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
-                          <div className="flex items-center gap-3">
-                            <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 bg-white px-2 py-1 rounded-md border border-slate-200 shadow-sm">
-                              {new Date(record.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute:'2-digit' })}
-                            </span>
-                            <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-100">
-                              {record.encounter_type || 'Routine Exam'}
-                            </span>
+                        <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden transition-all duration-200 ${isExpanded ? 'ring-2 ring-emerald-500/20' : 'hover:border-slate-300 hover:shadow-md'}`}>
+                          
+                          {/* Collapsible Header */}
+                          <div 
+                            onClick={() => toggleRecord(record.id)}
+                            className="w-full text-left px-5 py-4 bg-white flex flex-col sm:flex-row sm:items-center justify-between gap-4 cursor-pointer"
+                          >
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center gap-3 mb-1.5">
+                                <span className="text-[10px] font-black uppercase tracking-widest text-emerald-700 bg-emerald-50 px-2 py-1 rounded-md border border-emerald-100 flex items-center gap-1.5">
+                                  <CalendarClock size={12} />
+                                  {new Date(record.record_date || record.created_at).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: '2-digit' })}
+                                </span>
+                                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500 bg-slate-100 px-2 py-1 rounded-md border border-slate-200">
+                                  {record.record_type || 'Exam'}
+                                </span>
+                                {!isEditable(record.created_at) && (
+                                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-400 flex items-center gap-1" title="ZLA Compliance Lock Active">
+                                    <ShieldAlert size={10} /> Sealed
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-sm font-bold text-slate-800 truncate" title={problemTitle}>
+                                {problemTitle}
+                              </p>
+                            </div>
+                            
+                            <div className="flex items-center gap-6 shrink-0 text-[11px] font-black uppercase tracking-widest text-slate-500">
+                              <div className="flex items-center gap-2">
+                                <UserRound size={14} className="text-slate-400" />
+                                <span className={record.conductor_role === 'EXTERNAL_VET' ? 'text-rose-600' : ''}>
+                                  {conductorName}
+                                </span>
+                              </div>
+                              <div className="flex items-center gap-2 w-20 justify-end">
+                                <Scale size={14} className="text-slate-400" />
+                                {linkedWeight}g
+                              </div>
+                              <ChevronDown size={18} className={`text-slate-300 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`} />
+                            </div>
                           </div>
-                          <div className="text-[10px] font-black uppercase tracking-widest text-slate-500 flex items-center gap-2">
-                            {record.conductor_role === 'EXTERNAL_VET' ? (
-                              <span className="text-rose-600 bg-rose-50 px-2 py-1 rounded border border-rose-100">
-                                External: Dr. {record.external_vet_name} ({record.external_vet_clinic})
-                              </span>
-                            ) : (
-                              <span>Dr./Vet: {record.users?.name || 'Unknown'}</span>
-                            )}
-                            <span className="text-slate-300">|</span> 
-                            <span>{record.weight_grams}g</span>
-                          </div>
-                        </div>
 
-                        {/* Strict SOAP Formatting */}
-                        <div className="p-4 space-y-4">
-                          <div className="bg-blue-50/50 p-3 rounded-xl border border-blue-100">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-blue-600 mb-1">Subjective (History/Obs)</p>
-                            <p className="text-sm text-slate-700 leading-relaxed">{record.soap_subjective}</p>
-                          </div>
-                          <div className="bg-emerald-50/50 p-3 rounded-xl border border-emerald-100">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-1">Objective (Exam/Vitals)</p>
-                            <p className="text-sm text-slate-700 leading-relaxed">{record.soap_objective}</p>
-                          </div>
-                          <div className="bg-amber-50/50 p-3 rounded-xl border border-amber-100">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-600 mb-1">Assessment (Diagnosis)</p>
-                            <p className="text-sm text-slate-700 leading-relaxed">{record.soap_assessment}</p>
-                          </div>
-                          <div className="bg-purple-50/50 p-3 rounded-xl border border-purple-100">
-                            <p className="text-[10px] font-black uppercase tracking-widest text-purple-600 mb-1">Plan (Treatment/Action)</p>
-                            <p className="text-sm text-slate-700 leading-relaxed">{record.soap_plan}</p>
-                          </div>
-                        </div>
+                          {/* Expanded SOAP Body & Actions */}
+                          {isExpanded && (
+                            <div className="p-5 pt-0 border-t border-slate-100 bg-slate-50/50 mt-2">
+                              
+                              {record.conductor_role === 'EXTERNAL_VET' && (
+                                <div className="mb-4 bg-rose-50 text-rose-800 p-3 rounded-lg border border-rose-100 text-xs font-medium flex items-center gap-2">
+                                  <AlertCircle size={14} className="text-rose-500" />
+                                  External Consultation at {record.external_vet_clinic}. Logged by internal staff.
+                                </div>
+                              )}
+                              
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+                                <div className="bg-blue-50/50 p-4 rounded-xl border border-blue-100 shadow-sm">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-blue-600 mb-2 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-blue-500"></div> Subjective</div>
+                                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{record.soap_subjective}</p>
+                                </div>
+                                <div className="bg-emerald-50/50 p-4 rounded-xl border border-emerald-100 shadow-sm">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-emerald-500"></div> Objective</div>
+                                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{record.soap_objective}</p>
+                                </div>
+                                <div className="bg-amber-50/50 p-4 rounded-xl border border-amber-100 shadow-sm md:col-span-2">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-amber-600 mb-2 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-amber-500"></div> Assessment</div>
+                                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{record.soap_assessment}</p>
+                                </div>
+                                <div className="bg-purple-50/50 p-4 rounded-xl border border-purple-100 shadow-sm md:col-span-2">
+                                  <div className="text-[10px] font-black uppercase tracking-widest text-purple-600 mb-2 flex items-center gap-1.5"><div className="w-1.5 h-1.5 rounded-full bg-purple-500"></div> Plan</div>
+                                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">{record.soap_plan}</p>
+                                </div>
+                              </div>
 
+                              {/* Action Footer */}
+                              <div className="flex justify-between items-center pt-4 border-t border-slate-200">
+                                {!canEdit ? (
+                                  <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-1.5">
+                                    <ShieldAlert size={12} /> ZLA Compliance Lock Active (Past 30 Days)
+                                  </p>
+                                ) : (
+                                  <div className="flex gap-2">
+                                    <button 
+                                      onClick={(e) => handleEditTrigger(e, record)}
+                                      className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer"
+                                      title="Edit Record"
+                                    >
+                                      <Edit size={16} />
+                                    </button>
+                                    <button 
+                                      onClick={(e) => handleDeleteTrigger(e, record.id, record.weight_log_id)}
+                                      className="p-2 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                      title="Delete Record"
+                                    >
+                                      <Trash2 size={16} />
+                                    </button>
+                                  </div>
+                                )}
+                                
+                                {hasPermission('clinical:prescribe') && (
+                                  <button 
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setLinkedClinicalIdForMAR(record.id);
+                                      setIsMARModalOpen(true);
+                                    }}
+                                    className="text-[10px] font-black uppercase tracking-widest text-rose-600 bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-200 hover:bg-rose-100 transition-colors flex items-center gap-1.5 cursor-pointer"
+                                  >
+                                    <Pill size={12} /> Issue Prescription
+                                  </button>
+                                )}
+                              </div>
+
+                            </div>
+                          )}
+
+                        </div>
                       </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -214,12 +435,68 @@ function ClinicalRecordsModule() {
         )}
       </div>
 
-      {/* 3. Strict SOAP Form Modal */}
-      {isModalOpen && selectedAnimal && (
+      {/* CONFIRMATION DELETE MODAL */}
+      {recordToDelete && (
+        <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+           <div className="bg-white max-w-sm w-full rounded-2xl shadow-2xl p-6 animate-in zoom-in-95 duration-200">
+             <div className="flex items-center gap-3 text-rose-600 mb-4">
+               <AlertTriangle size={24} />
+               <h3 className="text-lg font-black tracking-tight">Confirm Deletion</h3>
+             </div>
+             <p className="text-sm text-slate-600 mb-6 leading-relaxed">
+               Are you sure you want to permanently delete this clinical record? This action will also remove the associated weight log. This cannot be undone.
+             </p>
+             <div className="flex justify-end gap-3">
+               <button 
+                 onClick={() => setRecordToDelete(null)}
+                 disabled={deleteMutation.isPending}
+                 className="px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-all"
+               >
+                 Cancel
+               </button>
+               <button 
+                 onClick={() => deleteMutation.mutate(recordToDelete)}
+                 disabled={deleteMutation.isPending}
+                 className="bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 shadow-sm"
+               >
+                 {deleteMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <Trash2 size={16} />}
+                 Delete Record
+               </button>
+             </div>
+           </div>
+        </div>
+      )}
+
+      {/* MODALS */}
+      {isSOAPModalOpen && selectedAnimal && (
         <SOAPFormModal 
           animalId={selectedAnimal.id} 
           animalName={selectedAnimal.name!}
-          onClose={() => setIsModalOpen(false)} 
+          staffMembers={staffMembers}
+          isStaffLoading={isStaffLoading}
+          existingRecord={recordToEdit} 
+          onClose={() => {
+            setIsSOAPModalOpen(false);
+            setRecordToEdit(null); 
+          }}
+          onMARTriggered={(clinicalRecordId) => {
+            setIsSOAPModalOpen(false);
+            setRecordToEdit(null);
+            setLinkedClinicalIdForMAR(clinicalRecordId);
+            setIsMARModalOpen(true);
+          }}
+        />
+      )}
+
+      {isMARModalOpen && selectedAnimal && (
+        <PrescriptionFormModal
+          animalId={selectedAnimal.id}
+          animalName={selectedAnimal.name!}
+          clinicalRecordId={linkedClinicalIdForMAR || undefined}
+          onClose={() => {
+            setIsMARModalOpen(false);
+            setLinkedClinicalIdForMAR(null);
+          }}
         />
       )}
     </div>
@@ -227,260 +504,446 @@ function ClinicalRecordsModule() {
 }
 
 // ------------------------------------------------------------------
-// STRICT S.O.A.P. DATA ENTRY MODAL (Upgraded with Dual-Insertion)
+// PREMIUM S.O.A.P. DATA ENTRY MODAL (With Fixes)
 // ------------------------------------------------------------------
-function SOAPFormModal({ animalId, animalName, onClose }: { animalId: string, animalName: string, onClose: () => void }) {
+function SOAPFormModal({ 
+  animalId, 
+  animalName, 
+  staffMembers, 
+  isStaffLoading, 
+  existingRecord, 
+  onClose,
+  onMARTriggered
+}: { 
+  animalId: string, 
+  animalName: string, 
+  staffMembers: any[], 
+  isStaffLoading: boolean, 
+  existingRecord?: any, 
+  onClose: () => void,
+  onMARTriggered: (recordId: string) => void
+}) {
   const { profile } = useAuth();
   const queryClient = useQueryClient();
 
-  // Field State
-  const [encounterType, setEncounterType] = useState('Routine Exam');
+  const isEditMode = !!existingRecord;
+
+  // INITIAL STATE
+  const [recordType, setRecordType] = useState('Routine Exam');
+  const [title, setTitle] = useState('');
+  const [recordDate, setRecordDate] = useState('');
   const [weight, setWeight] = useState('');
   const [subjective, setSubjective] = useState('');
   const [objective, setObjective] = useState('');
   const [assessment, setAssessment] = useState('');
   const [plan, setPlan] = useState('');
-
-  // Conductor State
+  const [requiresMedication, setRequiresMedication] = useState(false);
   const [conductorType, setConductorType] = useState<'INTERNAL' | 'EXTERNAL'>('INTERNAL');
   const [conductedBy, setConductedBy] = useState(profile?.id || '');
   const [externalVetName, setExternalVetName] = useState('');
   const [externalClinic, setExternalClinic] = useState('');
 
-  // Query Active Staff for the Dropdown
-  const { data: staffMembers = [] } = useQuery({
-    queryKey: ['active_staff'],
-    queryFn: async () => {
-      const { data, error } = await supabase
-        .from('users')
-        .select('id, name, role')
-        .eq('is_active', true)
-        .order('name');
-      if (error) throw error;
-      return data;
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // FIX: Aggressive Hydration logic that safely extracts weight
+  useEffect(() => {
+    if (existingRecord) {
+      setRecordType(existingRecord.record_type || 'Routine Exam');
+      setTitle(existingRecord.title || '');
+      setSubjective(existingRecord.soap_subjective || '');
+      setObjective(existingRecord.soap_objective || '');
+      setAssessment(existingRecord.soap_assessment || '');
+      setPlan(existingRecord.soap_plan || '');
+      
+      if (existingRecord.conductor_role === 'EXTERNAL_VET') {
+        setConductorType('EXTERNAL');
+        setExternalVetName(existingRecord.external_vet_name || '');
+        setExternalClinic(existingRecord.external_vet_clinic || '');
+      } else {
+        setConductorType('INTERNAL');
+        setConductedBy(existingRecord.conducted_by || profile?.id || '');
+      }
+
+      if (existingRecord.record_date) {
+        const existingDate = new Date(existingRecord.record_date);
+        existingDate.setMinutes(existingDate.getMinutes() - existingDate.getTimezoneOffset());
+        setRecordDate(existingDate.toISOString().slice(0, 16));
+      }
+
+      // FIX: Robust Weight Extraction
+      const wLog = existingRecord.weight_logs || existingRecord.weight;
+      if (wLog) {
+        if (Array.isArray(wLog) && wLog.length > 0) {
+          setWeight(wLog[0].weight_grams?.toString() || '');
+        } else if (!Array.isArray(wLog) && wLog.weight_grams !== undefined) {
+          setWeight(wLog.weight_grams?.toString() || '');
+        } else {
+          setWeight('');
+        }
+      } else {
+        setWeight('');
+      }
+      
+    } else {
+      // Set defaults for new record
+      const now = new Date();
+      now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
+      setRecordDate(now.toISOString().slice(0, 16));
+      setWeight('');
     }
-  });
+  }, [existingRecord, profile?.id]);
 
-  const submitMutation = useMutation({
-    mutationFn: async () => {
-      if (!profile) throw new Error("Unauthorized");
-      if (!subjective || !objective || !assessment || !plan || !weight) {
-        throw new Error("All SOAP fields and weight are mandatory for ZLA compliance.");
-      }
-      if (conductorType === 'EXTERNAL' && (!externalVetName || !externalClinic)) {
-        throw new Error("External Vet Name and Clinic are required.");
+  const submitMutation = async () => {
+    setIsSubmitting(true);
+    try {
+      if (!profile) throw new Error("Authentication error: No active profile found.");
+      
+      // Safe UI Validation
+      if (!title?.trim()) throw new Error("A Clinical Title/Diagnosis is mandatory.");
+      if (!recordDate) throw new Error("Record Date & Time is mandatory.");
+      if (!weight) throw new Error("Weight is a mandatory field.");
+      if (!subjective?.trim()) throw new Error("Subjective notes are mandatory.");
+      if (!objective?.trim()) throw new Error("Objective notes are mandatory.");
+      if (!assessment?.trim()) throw new Error("Assessment is mandatory.");
+      if (!plan?.trim()) throw new Error("Treatment Plan is mandatory.");
+      
+      if (conductorType === 'EXTERNAL') {
+        if (!externalVetName?.trim()) throw new Error("External Vet Name is required.");
+        if (!externalClinic?.trim()) throw new Error("External Clinic Name is required.");
       }
 
-      // Determine correct UUID and Role based on toggle
-      // If external, the person logging it (profile.id) takes accountability for data entry
       const finalConductedBy = conductorType === 'INTERNAL' ? conductedBy : profile.id;
       const finalConductorRole = conductorType === 'INTERNAL' 
-        ? (staffMembers.find(s => s.id === conductedBy)?.role || 'UNKNOWN') 
+        ? (staffMembers.find(s => s.id === conductedBy)?.role || profile.role || 'UNKNOWN') 
         : 'EXTERNAL_VET';
 
-      // 1. Insert into Clinical Records
-      const { error: clinicalError } = await supabase.from('clinical_records').insert({
-        animal_id: animalId,
-        encounter_type: encounterType,
-        weight_grams: Number(weight),
-        soap_subjective: subjective,
-        soap_objective: objective,
-        soap_assessment: assessment,
-        soap_plan: plan,
-        conducted_by: finalConductedBy,
-        conductor_role: finalConductorRole,
-        external_vet_name: conductorType === 'EXTERNAL' ? externalVetName : null,
-        external_vet_clinic: conductorType === 'EXTERNAL' ? externalClinic : null,
-        created_by: profile.id,
-        modified_by: profile.id,
-      });
+      const parsedDateObj = new Date(recordDate);
+      const parsedRecordDate = parsedDateObj.toISOString();
+      const calculatedAmPm = parsedDateObj.getHours() >= 12 ? 'PM' : 'AM';
 
-      if (clinicalError) throw clinicalError;
+      const payload = {
+          record_type: recordType, 
+          title: title.trim(), 
+          record_date: parsedRecordDate, 
+          soap_subjective: subjective.trim(), 
+          soap_objective: objective.trim(),
+          soap_assessment: assessment.trim(),
+          soap_plan: plan.trim(),
+          conducted_by: finalConductedBy,
+          conductor_role: finalConductorRole,
+          external_vet_name: conductorType === 'EXTERNAL' ? externalVetName.trim() : null,
+          external_vet_clinic: conductorType === 'EXTERNAL' ? externalClinic.trim() : null,
+      };
 
-      // 2. Dual-Insert into Weight Logs table to keep graphs synced
-      const { error: weightError } = await supabase.from('weight_logs').insert({
-        animal_id: animalId,
-        weight_grams: Number(weight),
-        recorded_by: finalConductedBy, // Credits the person who actually conducted the exam
-      });
+      let returnedRecordId = existingRecord?.id;
 
-      if (weightError) {
-        console.error("Weight Dual-Insert Failed:", weightError);
-        // We throw a specific error so the user knows the clinical note saved, but weight graph didn't update
-        throw new Error("Clinical record saved, but failed to sync weight to husbandry logs.");
+      if (isEditMode) {
+        // --- EDIT MODE ---
+        let finalWeightLogId = existingRecord.weight_log_id;
+
+        if (finalWeightLogId) {
+          // Update existing linked weight log
+          const { error: weightError } = await supabase.from('weight_logs').update({
+            weight_grams: Number(weight),
+            recorded_by: finalConductedBy,
+            recorded_at: parsedRecordDate,
+            am_pm: calculatedAmPm,
+            modified_by: profile.id,
+          }).eq('id', finalWeightLogId);
+
+          if (weightError) throw new Error(`Failed to update weight log: ${weightError.message}`);
+        } else {
+          // FIX: If old record lacked a link, create and forge one now
+          const { data: newWeightData, error: newWeightError } = await supabase.from('weight_logs').insert({
+              animal_id: animalId,
+              weight_grams: Number(weight),
+              recorded_by: finalConductedBy,
+              recorded_at: parsedRecordDate, 
+              am_pm: calculatedAmPm,
+              created_by: profile.id
+          }).select('id').single();
+
+          if (newWeightError) throw new Error(`Failed to create missing weight log: ${newWeightError.message}`);
+          
+          finalWeightLogId = newWeightData.id;
+        }
+
+        // Update clinical record with explicit weight link
+        const { error: clinicalError } = await supabase.from('clinical_records').update({
+          ...payload,
+          modified_by: profile.id,
+          weight_log_id: finalWeightLogId 
+        }).eq('id', existingRecord.id);
+
+        if (clinicalError) throw new Error(`Clinical Update Error: ${clinicalError.message}`);
+        
+      } else {
+        // --- INSERT MODE (NEW RECORD) ---
+        const { data: weightData, error: weightError } = await supabase.from('weight_logs').insert({
+          animal_id: animalId,
+          weight_grams: Number(weight),
+          recorded_by: finalConductedBy,
+          recorded_at: parsedRecordDate, 
+          am_pm: calculatedAmPm,
+          created_by: profile.id
+        }).select('id').single();
+
+        if (weightError) throw new Error(`Failed to secure weight log: ${weightError.message}`);
+
+        const { data: clinicalData, error: clinicalError } = await supabase.from('clinical_records').insert({
+          animal_id: animalId,
+          ...payload,
+          created_by: profile.id, 
+          modified_by: profile.id,
+          weight_log_id: weightData.id 
+        }).select('id').single();
+
+        if (clinicalError) throw new Error(`Clinical Insert Error: ${clinicalError.message}`);
+        
+        returnedRecordId = clinicalData.id;
       }
-    },
-    onSuccess: () => {
+
+      // --- ON SUCCESS ---
       queryClient.invalidateQueries({ queryKey: ['clinical_records', animalId] });
-      queryClient.invalidateQueries({ queryKey: ['weight_logs', animalId] }); // Triggers graph update
-      toast.success('Clinical Record & Weight successfully sealed.');
-      onClose();
-    },
-    onError: (err: Error) => {
-      toast.error(err.message);
+      queryClient.invalidateQueries({ queryKey: ['weight_logs', animalId] }); 
+      
+      if (requiresMedication) {
+        toast.success(isEditMode ? 'Record updated. Proceeding to MARs...' : 'Record sealed. Proceeding to MARs...');
+        onMARTriggered(returnedRecordId);
+      } else {
+        toast.success(isEditMode ? 'Clinical Record successfully updated.' : 'Clinical Record officially sealed and logged.');
+        onClose();
+      }
+
+    } catch (err: any) {
+      console.error("Mutation failed:", err);
+      toast.error(err.message || "An unexpected error occurred.");
+    } finally {
+      setIsSubmitting(false);
     }
-  });
+  };
 
   return (
     <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-      <div className="bg-white w-full max-w-3xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-in zoom-in-95 duration-200">
+      <div className="bg-slate-50 w-full max-w-5xl rounded-2xl shadow-2xl flex flex-col max-h-[90vh] overflow-hidden animate-in zoom-in-95 duration-200">
         
-        {/* Header */}
-        <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-slate-50">
+        <div className="px-6 py-4 border-b border-slate-200 flex justify-between items-center bg-white shrink-0">
           <div>
             <h3 className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2">
               <Stethoscope className="text-emerald-500" size={20} />
-              New Clinical Entry
+              {isEditMode ? 'Edit Clinical Entry' : 'New Clinical Entry'}
             </h3>
             <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-0.5">Patient: {animalName}</p>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-200 rounded-full text-slate-400 hover:text-slate-600 transition-colors">
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full text-slate-400 hover:text-slate-600 transition-colors">
             <X size={20} />
           </button>
         </div>
 
-        {/* Scrollable Form Body */}
-        <div className="p-6 overflow-y-auto custom-scrollbar space-y-6">
-          
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Encounter Type</label>
-              <select 
-                value={encounterType} onChange={(e) => setEncounterType(e.target.value)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-              >
-                <option value="Routine Exam">Routine Exam</option>
-                <option value="Emergency Triage">Emergency Triage</option>
-                <option value="Recheck / Follow-up">Recheck / Follow-up</option>
-                <option value="Surgery / Procedure">Surgery / Procedure</option>
-              </select>
-            </div>
-            <div>
-              <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Current Weight (g) *</label>
-              <input 
-                type="number" value={weight} onChange={(e) => setWeight(e.target.value)} placeholder="e.g. 1250"
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-4 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500"
-              />
-            </div>
-          </div>
-
-          {/* DYNAMIC CONDUCTOR BLOCK */}
-          <div className="bg-slate-100 rounded-xl p-4 border border-slate-200 space-y-4">
-            <div className="flex items-center gap-2 mb-2">
-              <UserRound size={16} className="text-slate-500" />
-              <h4 className="text-xs font-black uppercase tracking-widest text-slate-700">Conductor Details</h4>
-            </div>
+        <div className="p-6 overflow-y-auto custom-scrollbar flex-1">
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
             
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div>
-                <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Conducted By</label>
-                <select 
-                  value={conductorType} 
-                  onChange={(e) => setConductorType(e.target.value as 'INTERNAL' | 'EXTERNAL')}
-                  className="w-full bg-white border border-slate-300 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 focus:outline-none focus:border-emerald-500"
-                >
-                  <option value="INTERNAL">Internal Staff / Vet</option>
-                  <option value="EXTERNAL">External Vet</option>
-                </select>
+            <div className="lg:col-span-5 space-y-6">
+              <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm space-y-5">
+                
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Clinical Title / Diagnosis <span className="text-rose-500">*</span></label>
+                  <input 
+                    type="text" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="e.g. Suspected Bumblefoot"
+                    className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all placeholder:text-slate-300 placeholder:font-medium"
+                  />
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Record Type <span className="text-rose-500">*</span></label>
+                    <select 
+                      value={recordType} onChange={(e) => setRecordType(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all cursor-pointer"
+                    >
+                      <option value="Routine Exam">Routine Exam</option>
+                      <option value="Emergency Triage">Emergency Triage</option>
+                      <option value="Recheck / Follow-up">Recheck / Follow-up</option>
+                      <option value="Surgery / Procedure">Surgery / Procedure</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Date & Time <span className="text-rose-500">*</span></label>
+                    <input 
+                      type="datetime-local" 
+                      value={recordDate} 
+                      onChange={(e) => setRecordDate(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all cursor-pointer"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Current Weight (g) <span className="text-rose-500">*</span></label>
+                  <div className="relative">
+                    <Scale className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+                    <input 
+                      type="number" value={weight} onChange={(e) => setWeight(e.target.value)} placeholder="e.g. 1250"
+                      className="w-full pl-9 pr-4 bg-slate-50 border border-slate-200 rounded-lg py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all placeholder:text-slate-300 placeholder:font-medium"
+                    />
+                  </div>
+                  <p className="text-[9px] font-bold text-slate-400 mt-1.5 uppercase tracking-widest flex items-center gap-1">
+                    Auto-syncs to Husbandry Logs
+                  </p>
+                </div>
+
+                {/* MAR PIPELINE TOGGLE */}
+                <div className="pt-4 border-t border-slate-100">
+                  <label className="flex items-center gap-3 cursor-pointer group w-max">
+                    <div className={`w-5 h-5 rounded border flex items-center justify-center transition-colors ${requiresMedication ? 'bg-rose-500 border-rose-500' : 'bg-slate-50 border-slate-300 group-hover:border-slate-400'}`}>
+                      {requiresMedication && <div className="w-2 h-2 bg-white rounded-sm" />}
+                    </div>
+                    <div>
+                      <p className="text-xs font-bold text-slate-800 flex items-center gap-1.5">
+                        <Pill size={14} className={requiresMedication ? "text-rose-500" : "text-slate-400"} /> 
+                        Medication Required?
+                      </p>
+                    </div>
+                  </label>
+                  <input type="checkbox" className="sr-only" checked={requiresMedication} onChange={(e) => setRequiresMedication(e.target.checked)} />
+                </div>
               </div>
 
-              {conductorType === 'INTERNAL' ? (
-                <div className="md:col-span-2">
-                  <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Select Staff Member</label>
-                  <select 
-                    value={conductedBy} 
-                    onChange={(e) => setConductedBy(e.target.value)}
-                    className="w-full bg-white border border-slate-300 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 focus:outline-none focus:border-emerald-500"
-                  >
-                    {staffMembers.map(user => (
-                      <option key={user.id} value={user.id}>{user.name} ({user.role})</option>
-                    ))}
-                  </select>
+              <div className="bg-white rounded-xl p-5 border border-slate-200 shadow-sm">
+                <div className="flex items-center gap-2 mb-4">
+                  <UserRound size={16} className="text-slate-400" />
+                  <h4 className="text-xs font-black uppercase tracking-widest text-slate-700">Conductor Details</h4>
                 </div>
-              ) : (
-                <>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase tracking-widest text-rose-500 mb-2">Vet Name *</label>
-                    <input 
-                      type="text" value={externalVetName} onChange={(e) => setExternalVetName(e.target.value)} placeholder="e.g. Sarah Jenkins"
-                      className="w-full bg-white border border-rose-300 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 focus:outline-none focus:border-rose-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[10px] font-black uppercase tracking-widest text-rose-500 mb-2">Clinic Name *</label>
-                    <input 
-                      type="text" value={externalClinic} onChange={(e) => setExternalClinic(e.target.value)} placeholder="e.g. City Wildlife Vets"
-                      className="w-full bg-white border border-rose-300 rounded-xl px-4 py-2 text-sm font-bold text-slate-700 focus:outline-none focus:border-rose-500"
-                    />
-                  </div>
-                </>
-              )}
-            </div>
-            
-            {conductorType === 'EXTERNAL' && (
-              <p className="text-[10px] font-bold text-slate-500 flex items-center gap-1 mt-2">
-                <ShieldAlert size={12} className="text-rose-500" />
-                Note: You ({profile?.name}) will be recorded as the authorizing internal sponsor for this external exam.
-              </p>
-            )}
-          </div>
+                
+                <div className="flex bg-slate-100 p-1 rounded-lg mb-5">
+                  <button
+                    onClick={() => setConductorType('INTERNAL')}
+                    className={`flex-1 py-1.5 text-xs font-black uppercase tracking-widest rounded-md transition-all ${conductorType === 'INTERNAL' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                  >
+                    Internal
+                  </button>
+                  <button
+                    onClick={() => setConductorType('EXTERNAL')}
+                    className={`flex-1 py-1.5 text-xs font-black uppercase tracking-widest rounded-md transition-all ${conductorType === 'EXTERNAL' ? 'bg-white shadow-sm text-slate-800' : 'text-slate-400 hover:text-slate-600'}`}
+                  >
+                    External Vet
+                  </button>
+                </div>
 
-          <div className="space-y-4">
-            <div>
-              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-blue-600 mb-2">
-                <div className="w-2 h-2 rounded-full bg-blue-500"></div> S - Subjective (History / Observations) *
-              </label>
-              <textarea 
-                value={subjective} onChange={(e) => setSubjective(e.target.value)} rows={3} placeholder="Keeper reports bird is reluctant to bear weight..."
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 resize-none"
-              />
-            </div>
-            
-            <div>
-              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2">
-                <div className="w-2 h-2 rounded-full bg-emerald-500"></div> O - Objective (Exam Findings / Vitals) *
-              </label>
-              <textarea 
-                value={objective} onChange={(e) => setObjective(e.target.value)} rows={3} placeholder="Grade III Bumblefoot lesion present on left plantar metatarsal pad..."
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:border-emerald-500 focus:ring-1 focus:ring-emerald-500 resize-none"
-              />
+                <div className="animate-in fade-in slide-in-from-bottom-2 duration-300">
+                  {conductorType === 'INTERNAL' ? (
+                    <div>
+                      <label className="block text-[10px] font-black uppercase tracking-widest text-slate-500 mb-2">Select Staff Member <span className="text-rose-500">*</span></label>
+                      <select 
+                        value={conductedBy} 
+                        onChange={(e) => setConductedBy(e.target.value)}
+                        disabled={isStaffLoading}
+                        className="w-full bg-slate-50 border border-slate-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all disabled:opacity-50 cursor-pointer"
+                      >
+                        {staffMembers.map(user => (
+                          <option key={user.id} value={user.id}>{user.name} ({user.role.replace('_', ' ')})</option>
+                        ))}
+                      </select>
+                    </div>
+                  ) : (
+                    <div className="space-y-4">
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-rose-500 mb-2">Attending Vet Name <span className="text-rose-500">*</span></label>
+                        <input 
+                          type="text" value={externalVetName} onChange={(e) => setExternalVetName(e.target.value)} placeholder="e.g. Dr. Sarah Jenkins"
+                          className="w-full bg-white border border-rose-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-all placeholder:text-slate-300"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-black uppercase tracking-widest text-rose-500 mb-2">Clinic Name <span className="text-rose-500">*</span></label>
+                        <input 
+                          type="text" value={externalClinic} onChange={(e) => setExternalClinic(e.target.value)} placeholder="e.g. City Wildlife Vets"
+                          className="w-full bg-white border border-rose-200 rounded-lg px-3 py-2.5 text-sm font-bold text-slate-700 focus:outline-none focus:ring-2 focus:ring-rose-500/20 focus:border-rose-500 transition-all placeholder:text-slate-300"
+                        />
+                      </div>
+                      <div className="flex items-start gap-2 bg-rose-50 p-3 rounded-lg border border-rose-100">
+                        <AlertCircle size={14} className="text-rose-500 mt-0.5 shrink-0" />
+                        <p className="text-[10px] font-medium text-rose-800 leading-relaxed uppercase tracking-widest">
+                          You will be recorded as the authorizing internal sponsor for this external consultation.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             </div>
 
-            <div>
-              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-amber-600 mb-2">
-                <div className="w-2 h-2 rounded-full bg-amber-500"></div> A - Assessment (Diagnosis) *
-              </label>
-              <textarea 
-                value={assessment} onChange={(e) => setAssessment(e.target.value)} rows={2} placeholder="Pododermatitis (Bumblefoot) - Left Foot."
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:border-amber-500 focus:ring-1 focus:ring-amber-500 resize-none"
-              />
-            </div>
+            <div className="lg:col-span-7 bg-white rounded-xl p-6 border border-slate-200 shadow-sm flex flex-col gap-5">
+              <div className="flex-1 flex flex-col">
+                <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-blue-600 mb-2">
+                  <div className="w-2 h-2 rounded-full bg-blue-500"></div> S - Subjective (History / Observations) <span className="text-rose-500">*</span>
+                </label>
+                <textarea 
+                  value={subjective} onChange={(e) => setSubjective(e.target.value)} placeholder="Keeper reports bird is reluctant to bear weight..."
+                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none transition-all placeholder:text-slate-300"
+                />
+              </div>
+              
+              <div className="flex-1 flex flex-col">
+                <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-emerald-600 mb-2">
+                  <div className="w-2 h-2 rounded-full bg-emerald-500"></div> O - Objective (Exam Findings / Vitals) <span className="text-rose-500">*</span>
+                </label>
+                <textarea 
+                  value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="Grade III Bumblefoot lesion present on left plantar metatarsal pad..."
+                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-none transition-all placeholder:text-slate-300"
+                />
+              </div>
 
-            <div>
-              <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-purple-600 mb-2">
-                <div className="w-2 h-2 rounded-full bg-purple-500"></div> P - Plan (Treatment / Actions) *
-              </label>
-              <textarea 
-                value={plan} onChange={(e) => setPlan(e.target.value)} rows={3} placeholder="Apply hydrogel dressing. Start Meloxicam 0.5mg/kg PO SID..."
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl p-3 text-sm focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500 resize-none"
-              />
+              <div className="flex-1 flex flex-col">
+                <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-amber-600 mb-2">
+                  <div className="w-2 h-2 rounded-full bg-amber-500"></div> A - Assessment (Diagnosis) <span className="text-rose-500">*</span>
+                </label>
+                <textarea 
+                  value={assessment} onChange={(e) => setAssessment(e.target.value)} placeholder="Pododermatitis (Bumblefoot) - Left Foot."
+                  className="flex-1 min-h-[80px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 resize-none transition-all placeholder:text-slate-300"
+                />
+              </div>
+
+              <div className="flex-1 flex flex-col">
+                <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-purple-600 mb-2">
+                  <div className="w-2 h-2 rounded-full bg-purple-500"></div> P - Plan (Treatment / Actions) <span className="text-rose-500">*</span>
+                </label>
+                <textarea 
+                  value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="Apply hydrogel dressing. Start Meloxicam 0.5mg/kg PO SID..."
+                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 resize-none transition-all placeholder:text-slate-300"
+                />
+              </div>
             </div>
           </div>
         </div>
 
-        {/* Footer */}
-        <div className="px-6 py-4 border-t border-slate-200 bg-slate-50 flex justify-end gap-3 shrink-0">
-          <button onClick={onClose} className="px-4 py-2 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 hover:bg-slate-200 rounded-xl transition-colors">
-            Cancel
-          </button>
-          <button 
-            onClick={() => submitMutation.mutate()}
-            disabled={submitMutation.isPending}
-            className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white px-6 py-2 rounded-xl text-xs font-black uppercase tracking-widest transition-colors flex items-center gap-2 shadow-sm"
-          >
-            {submitMutation.isPending ? <Loader2 size={16} className="animate-spin" /> : <ShieldAlert size={16} />}
-            Seal Record
-          </button>
+        <div className="px-6 py-4 border-t border-slate-200 bg-white flex justify-between items-center shrink-0 rounded-b-2xl">
+          {requiresMedication ? (
+             <div className="text-[10px] font-bold text-rose-600 uppercase tracking-widest flex items-center gap-1.5 bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-100">
+               <Pill size={14} /> MAR Pipeline Engaged
+             </div>
+          ) : (
+            <div />
+          )}
+
+          <div className="flex gap-3">
+            <button 
+              onClick={onClose} 
+              disabled={isSubmitting}
+              className="px-6 py-2.5 text-xs font-black uppercase tracking-widest text-slate-500 hover:text-slate-700 hover:bg-slate-100 rounded-xl transition-all disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button 
+              onClick={submitMutation}
+              disabled={isSubmitting}
+              className={`${requiresMedication ? 'bg-rose-500 hover:bg-rose-600' : 'bg-emerald-500 hover:bg-emerald-600'} disabled:opacity-50 disabled:cursor-not-allowed text-white px-8 py-2.5 rounded-xl text-xs font-black uppercase tracking-widest transition-all flex items-center gap-2 shadow-sm hover:shadow active:scale-95`}
+            >
+              {isSubmitting ? <Loader2 size={16} className="animate-spin" /> : requiresMedication ? <ChevronRight size={16} /> : <ShieldAlert size={16} />}
+              {isEditMode ? 'Update Record' : requiresMedication ? 'Seal & Prescribe' : 'Seal Clinical Record'}
+            </button>
+          </div>
         </div>
         
       </div>
