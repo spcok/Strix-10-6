@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { createFileRoute } from '@tanstack/react-router';
+import { createFileRoute, useNavigate } from '@tanstack/react-router'; // Added useNavigate
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { 
   Stethoscope, Search, Plus, Activity, 
@@ -9,7 +9,6 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { toast } from 'sonner';
 
-// Ensure this path matches your project structure exactly
 import PrescriptionFormModal from '../components/medical/PrescriptionFormModal';
 
 export const Route = createFileRoute('/clinical/records')({
@@ -41,6 +40,8 @@ function isEditable(createdAt: string): boolean {
 function ClinicalRecordsModule() {
   const { hasPermission, profile } = useAuth();
   const queryClient = useQueryClient();
+  const navigate = useNavigate(); // Added for the MAR badge click
+  
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedAnimalId, setSelectedAnimalId] = useState<string | null>(null);
   
@@ -91,7 +92,6 @@ function ClinicalRecordsModule() {
     queryFn: async () => {
       const { data, error } = await supabase
         .from('clinical_records')
-        // FIX: Native PostgREST join without strict aliasing prevents silent failures
         .select(`
           *,
           weight_logs(weight_grams)
@@ -102,13 +102,13 @@ function ClinicalRecordsModule() {
       
       if (error) {
         console.error("Timeline Query Error:", error);
+        toast.error(`Database Error: ${error.message}`);
         throw error;
       }
       return data;
     }
   });
 
-  // Check for active MARs to light up the badge
   const { data: activeMars = [] } = useQuery({
     queryKey: ['active_mars', selectedAnimalId],
     enabled: !!selectedAnimalId,
@@ -174,6 +174,13 @@ function ClinicalRecordsModule() {
   const handleOpenNewSOAP = () => {
     setRecordToEdit(null);
     setIsSOAPModalOpen(true);
+  };
+
+  const handleMARHandoff = (clinicalRecordId: string) => {
+    setLinkedClinicalIdForMAR(clinicalRecordId);
+    setIsMARModalOpen(true);
+    setIsSOAPModalOpen(false);
+    setRecordToEdit(null);
   };
 
   return (
@@ -264,11 +271,14 @@ function ClinicalRecordsModule() {
                   <Activity size={14} /> Target: {selectedAnimal.average_target_weight || 'N/A'}g
                 </div>
                 
-                {/* Dynamic MAR Badge */}
+                {/* Dynamic MAR Badge - Now clickable! */}
                 {activeMars.length > 0 ? (
-                  <div className="flex items-center gap-2 bg-rose-50 text-rose-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-rose-200 animate-pulse cursor-pointer hover:bg-rose-100">
+                  <button 
+                    onClick={() => navigate({ to: '/clinical/medications' })}
+                    className="flex items-center gap-2 bg-rose-50 text-rose-700 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-rose-200 animate-pulse cursor-pointer hover:bg-rose-100 transition-colors"
+                  >
                     <Pill size={14} /> {activeMars.length} Active MAR{activeMars.length > 1 ? 's' : ''}
-                  </div>
+                  </button>
                 ) : (
                   <div className="flex items-center gap-2 bg-slate-50 text-slate-400 px-3 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest border border-slate-200">
                     <Pill size={14} /> No Active MARs
@@ -298,7 +308,6 @@ function ClinicalRecordsModule() {
                     
                     const problemTitle = record.title || 'Clinical Evaluation';
                     
-                    // FIX: Safe weight extraction for the timeline UI
                     let linkedWeight = 'N/A';
                     const wLog = record.weight_logs || record.weight;
                     if (wLog) {
@@ -411,8 +420,7 @@ function ClinicalRecordsModule() {
                                   <button 
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      setLinkedClinicalIdForMAR(record.id);
-                                      setIsMARModalOpen(true);
+                                      handleMARHandoff(record.id);
                                     }}
                                     className="text-[10px] font-black uppercase tracking-widest text-rose-600 bg-rose-50 px-3 py-1.5 rounded-lg border border-rose-200 hover:bg-rose-100 transition-colors flex items-center gap-1.5 cursor-pointer"
                                   >
@@ -480,22 +488,21 @@ function ClinicalRecordsModule() {
             setRecordToEdit(null); 
           }}
           onMARTriggered={(clinicalRecordId) => {
-            setIsSOAPModalOpen(false);
-            setRecordToEdit(null);
-            setLinkedClinicalIdForMAR(clinicalRecordId);
-            setIsMARModalOpen(true);
+            handleMARHandoff(clinicalRecordId);
           }}
         />
       )}
 
       {isMARModalOpen && selectedAnimal && (
         <PrescriptionFormModal
-          animalId={selectedAnimal.id}
-          animalName={selectedAnimal.name!}
-          clinicalRecordId={linkedClinicalIdForMAR || undefined}
+          isOpen={isMARModalOpen}
           onClose={() => {
             setIsMARModalOpen(false);
             setLinkedClinicalIdForMAR(null);
+          }}
+          initialData={{
+            animal_id: selectedAnimal.id,
+            clinical_record_id: linkedClinicalIdForMAR
           }}
         />
       )}
@@ -504,7 +511,7 @@ function ClinicalRecordsModule() {
 }
 
 // ------------------------------------------------------------------
-// PREMIUM S.O.A.P. DATA ENTRY MODAL (With Fixes)
+// PREMIUM S.O.A.P. DATA ENTRY MODAL
 // ------------------------------------------------------------------
 function SOAPFormModal({ 
   animalId, 
@@ -538,6 +545,7 @@ function SOAPFormModal({
   const [assessment, setAssessment] = useState('');
   const [plan, setPlan] = useState('');
   const [requiresMedication, setRequiresMedication] = useState(false);
+  
   const [conductorType, setConductorType] = useState<'INTERNAL' | 'EXTERNAL'>('INTERNAL');
   const [conductedBy, setConductedBy] = useState(profile?.id || '');
   const [externalVetName, setExternalVetName] = useState('');
@@ -545,7 +553,6 @@ function SOAPFormModal({
 
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // FIX: Aggressive Hydration logic that safely extracts weight
   useEffect(() => {
     if (existingRecord) {
       setRecordType(existingRecord.record_type || 'Routine Exam');
@@ -570,7 +577,6 @@ function SOAPFormModal({
         setRecordDate(existingDate.toISOString().slice(0, 16));
       }
 
-      // FIX: Robust Weight Extraction
       const wLog = existingRecord.weight_logs || existingRecord.weight;
       if (wLog) {
         if (Array.isArray(wLog) && wLog.length > 0) {
@@ -585,7 +591,6 @@ function SOAPFormModal({
       }
       
     } else {
-      // Set defaults for new record
       const now = new Date();
       now.setMinutes(now.getMinutes() - now.getTimezoneOffset());
       setRecordDate(now.toISOString().slice(0, 16));
@@ -598,7 +603,6 @@ function SOAPFormModal({
     try {
       if (!profile) throw new Error("Authentication error: No active profile found.");
       
-      // Safe UI Validation
       if (!title?.trim()) throw new Error("A Clinical Title/Diagnosis is mandatory.");
       if (!recordDate) throw new Error("Record Date & Time is mandatory.");
       if (!weight) throw new Error("Weight is a mandatory field.");
@@ -638,11 +642,9 @@ function SOAPFormModal({
       let returnedRecordId = existingRecord?.id;
 
       if (isEditMode) {
-        // --- EDIT MODE ---
         let finalWeightLogId = existingRecord.weight_log_id;
 
         if (finalWeightLogId) {
-          // Update existing linked weight log
           const { error: weightError } = await supabase.from('weight_logs').update({
             weight_grams: Number(weight),
             recorded_by: finalConductedBy,
@@ -650,10 +652,8 @@ function SOAPFormModal({
             am_pm: calculatedAmPm,
             modified_by: profile.id,
           }).eq('id', finalWeightLogId);
-
           if (weightError) throw new Error(`Failed to update weight log: ${weightError.message}`);
         } else {
-          // FIX: If old record lacked a link, create and forge one now
           const { data: newWeightData, error: newWeightError } = await supabase.from('weight_logs').insert({
               animal_id: animalId,
               weight_grams: Number(weight),
@@ -662,13 +662,10 @@ function SOAPFormModal({
               am_pm: calculatedAmPm,
               created_by: profile.id
           }).select('id').single();
-
           if (newWeightError) throw new Error(`Failed to create missing weight log: ${newWeightError.message}`);
-          
           finalWeightLogId = newWeightData.id;
         }
 
-        // Update clinical record with explicit weight link
         const { error: clinicalError } = await supabase.from('clinical_records').update({
           ...payload,
           modified_by: profile.id,
@@ -678,7 +675,6 @@ function SOAPFormModal({
         if (clinicalError) throw new Error(`Clinical Update Error: ${clinicalError.message}`);
         
       } else {
-        // --- INSERT MODE (NEW RECORD) ---
         const { data: weightData, error: weightError } = await supabase.from('weight_logs').insert({
           animal_id: animalId,
           weight_grams: Number(weight),
@@ -708,7 +704,6 @@ function SOAPFormModal({
       queryClient.invalidateQueries({ queryKey: ['weight_logs', animalId] }); 
       
       if (requiresMedication) {
-        toast.success(isEditMode ? 'Record updated. Proceeding to MARs...' : 'Record sealed. Proceeding to MARs...');
         onMARTriggered(returnedRecordId);
       } else {
         toast.success(isEditMode ? 'Clinical Record successfully updated.' : 'Clinical Record officially sealed and logged.');
@@ -879,9 +874,10 @@ function SOAPFormModal({
                 <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-blue-600 mb-2">
                   <div className="w-2 h-2 rounded-full bg-blue-500"></div> S - Subjective (History / Observations) <span className="text-rose-500">*</span>
                 </label>
+                {/* FIX: Changed resize-none to resize-y */}
                 <textarea 
                   value={subjective} onChange={(e) => setSubjective(e.target.value)} placeholder="Keeper reports bird is reluctant to bear weight..."
-                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-none transition-all placeholder:text-slate-300"
+                  className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 resize-y transition-all placeholder:text-slate-300"
                 />
               </div>
               
@@ -891,7 +887,7 @@ function SOAPFormModal({
                 </label>
                 <textarea 
                   value={objective} onChange={(e) => setObjective(e.target.value)} placeholder="Grade III Bumblefoot lesion present on left plantar metatarsal pad..."
-                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-none transition-all placeholder:text-slate-300"
+                  className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 focus:border-emerald-500 resize-y transition-all placeholder:text-slate-300"
                 />
               </div>
 
@@ -901,7 +897,7 @@ function SOAPFormModal({
                 </label>
                 <textarea 
                   value={assessment} onChange={(e) => setAssessment(e.target.value)} placeholder="Pododermatitis (Bumblefoot) - Left Foot."
-                  className="flex-1 min-h-[80px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 resize-none transition-all placeholder:text-slate-300"
+                  className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-amber-500/20 focus:border-amber-500 resize-y transition-all placeholder:text-slate-300"
                 />
               </div>
 
@@ -911,7 +907,7 @@ function SOAPFormModal({
                 </label>
                 <textarea 
                   value={plan} onChange={(e) => setPlan(e.target.value)} placeholder="Apply hydrogel dressing. Start Meloxicam 0.5mg/kg PO SID..."
-                  className="flex-1 min-h-[100px] w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 resize-none transition-all placeholder:text-slate-300"
+                  className="flex-1 w-full bg-slate-50 border border-slate-200 rounded-lg p-3 text-sm font-medium text-slate-700 focus:outline-none focus:ring-2 focus:ring-purple-500/20 focus:border-purple-500 resize-y transition-all placeholder:text-slate-300"
                 />
               </div>
             </div>
